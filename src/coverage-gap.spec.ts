@@ -5,19 +5,26 @@ import { validate } from 'class-validator';
 import { PaymentChannel, PaymentProvider } from '@prisma/client';
 import { ListPaymentOrdersDto } from './modules/payments/dto/list-payment-orders.dto.js';
 import { PaymentsRepository } from './modules/payments/payments.repository.js';
+import { PaymentsService } from './modules/payments/payments.service.js';
 import { PaymentsController } from './modules/payments/payments.controller.js';
 import { PaymentMethodsService } from './modules/payment-methods/payment-methods.service.js';
 import { PaymentMethodsController } from './modules/payment-methods/payment-methods.controller.js';
+import { WebhooksService } from './modules/webhooks/webhooks.service.js';
 import { WebhooksController } from './modules/webhooks/webhooks.controller.js';
 import { SignaturesController } from './modules/signatures/signatures.controller.js';
 import { SignaturesService } from './modules/signatures/signatures.service.js';
 import { MidtransService } from './modules/midtrans/midtrans.service.js';
 import { OutboxService } from './modules/outbox/outbox.service.js';
 import { PrismaService } from './prisma/prisma.service.js';
+import { RedisIdempotencyService } from './common/redis/redis-idempotency.service.js';
 import { ApiKeyGuard } from './common/guards/api-key.guard.js';
 import { createRequestLoggingMiddleware } from './common/middleware/request-logging.middleware.js';
 import { validate as validateEnvironment } from './config/env.validation.js';
-import { NotFoundException, UnauthorizedException } from '@nestjs/common';
+import {
+  BadGatewayException,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { generateHmacSignature } from './common/utils/signature.util.js';
 
 describe('coverage gaps', () => {
@@ -511,6 +518,7 @@ describe('coverage gaps', () => {
     const snap = await midtrans.createSnapTransaction({
       orderId: 'ORD-SNAP',
       grossAmount: 100000,
+      customerDetails: { first_name: 'Alice' },
     });
     expect(snap.token).toBe('snap-token');
 
@@ -684,8 +692,14 @@ describe('coverage gaps', () => {
         aggregateId: 'ord-1',
         payload: { a: 1 },
       },
+      {
+        id: 'e-failed-type',
+        eventType: 'PAYMENT_FAILED',
+        aggregateId: 'ord-1',
+        payload: { a: 2 },
+      },
     ]);
-    expect(await outbox.processPendingEvents()).toBe(1);
+    expect(await outbox.processPendingEvents()).toBe(2);
 
     // Kafka send failed branch
     prisma.outboxEvent.findMany.mockResolvedValueOnce([
@@ -728,5 +742,233 @@ describe('coverage gaps', () => {
     prismaService.$disconnect = jest.fn().mockResolvedValue(undefined);
     await prismaService.onModuleInit();
     await prismaService.onModuleDestroy();
+  });
+
+  it('covers remaining branches for full Bun coverage', async () => {
+    // 1. RedisIdempotencyService: default client instantiation and disconnect on error
+    const redisConfig = {
+      get: jest.fn((key: string, def?: unknown) => {
+        if (key === 'REDIS_ENABLED') return true;
+        if (key === 'REDIS_URL') return 'redis://localhost:6379';
+        return def;
+      }),
+    } as any;
+    const redisSvc = new RedisIdempotencyService(redisConfig);
+    const mockRedisObj = {
+      status: 'ready',
+      quit: jest.fn().mockRejectedValue(new Error('fail')),
+      disconnect: jest.fn(),
+    } as any;
+    (redisSvc as any).redis = mockRedisObj;
+    await redisSvc.onModuleDestroy();
+    expect(mockRedisObj.disconnect).toHaveBeenCalled();
+
+    // 2. MidtransService: production URLs, incomplete snap, mock snap, VA without vaNumber
+    const prodConfig = {
+      get: jest.fn((key: string) => {
+        if (key === 'MIDTRANS_SERVER_KEY') return 'test-key';
+        if (key === 'MIDTRANS_IS_PRODUCTION') return true;
+        return undefined;
+      }),
+    } as any;
+    const prodMidtrans = new MidtransService(prodConfig);
+    const post = jest.spyOn(axios, 'post');
+    // Snap incomplete response throws BadGatewayException
+    post.mockResolvedValueOnce({ data: {} });
+    await expect(
+      prodMidtrans.createSnapTransaction({
+        orderId: 'ORD-INCOMPLETE',
+        grossAmount: 100,
+      }),
+    ).rejects.toThrow('incomplete Snap');
+
+    // VA without va_numbers throws Error
+    post.mockResolvedValueOnce({ data: { order_id: '1' } });
+    await expect(
+      prodMidtrans.createVirtualAccount({
+        orderId: 'ORD-NO-VA',
+        grossAmount: 100,
+        bank: 'bca',
+      }),
+    ).rejects.toThrow('virtual account number');
+
+    // Mock snap token when server key is not configured
+    post.mockResolvedValueOnce({
+      data: {
+        order_id: 'ORD-QR-PROD',
+        transaction_status: 'pending',
+        actions: [
+          { name: 'generate-qr-code', url: 'https://api.midtrans.com/qr' },
+        ],
+      },
+    });
+    await prodMidtrans.createQrTransaction({
+      orderId: 'ORD-QR-PROD',
+      grossAmount: 100,
+    });
+    post.mockRejectedValueOnce(new BadGatewayException('bad gateway'));
+    await expect(
+      prodMidtrans.createQrTransaction({
+        orderId: 'ORD-QR-FAIL',
+        grossAmount: 100,
+      }),
+    ).rejects.toThrow('bad gateway');
+
+    const noKeyMidtrans = new MidtransService({
+      get: jest.fn((k) => (k === 'MIDTRANS_IS_PRODUCTION' ? false : '')),
+    } as any);
+    const mockSnap = await noKeyMidtrans.createSnapTransaction({
+      orderId: 'ORD-MOCK',
+      grossAmount: 100,
+    });
+    expect(mockSnap.token).toContain('mock-snap');
+    post.mockRestore();
+
+    // Status error fallback message
+    const get = jest.spyOn(axios, 'get');
+    get.mockRejectedValueOnce({ response: {} });
+    await expect(prodMidtrans.getTransactionStatus('ERR')).rejects.toThrow(
+      'Unknown Midtrans error',
+    );
+    get.mockRestore();
+
+    // 3. OutboxService: Kafka disabled branch and Kafka connect error
+    const outboxPrisma = { outboxEvent: { create: jest.fn() } } as any;
+    const outboxConfig = {
+      get: jest.fn().mockReturnValue('kafka:29092'),
+    } as any;
+    const disabledOutbox = new OutboxService(outboxPrisma, outboxConfig);
+    const origEnv = process.env.NODE_ENV;
+    const origKafka = process.env.KAFKA_ENABLED;
+    process.env.NODE_ENV = 'development';
+    process.env.KAFKA_ENABLED = 'false';
+    await disabledOutbox.onModuleInit();
+
+    // Undefined KAFKA_ENABLED in production (covers line 27)
+    delete process.env.KAFKA_ENABLED;
+    process.env.NODE_ENV = 'production';
+    const prodKafkaOutbox = new OutboxService(outboxPrisma, outboxConfig);
+    jest.spyOn(Kafka.prototype, 'producer').mockReturnValueOnce({
+      connect: jest.fn().mockResolvedValue(undefined),
+      disconnect: jest.fn().mockResolvedValue(undefined),
+    } as any);
+    await prodKafkaOutbox.onModuleInit();
+    await prodKafkaOutbox.onModuleDestroy();
+
+    // Kafka connect error
+    const brokenKafkaOutbox = new OutboxService(outboxPrisma, outboxConfig);
+    process.env.KAFKA_ENABLED = 'true';
+    jest.spyOn(Kafka.prototype, 'producer').mockReturnValueOnce({
+      connect: jest.fn().mockRejectedValue(new Error('broker down')),
+      disconnect: jest.fn().mockResolvedValue(undefined),
+    } as any);
+    await brokenKafkaOutbox.onModuleInit();
+    process.env.NODE_ENV = origEnv;
+    process.env.KAFKA_ENABLED = origKafka;
+    // 4. PaymentsRepository: findCurrentByOrderId latest fallback and listOrders without status
+    const repoPrisma = {
+      paymentTransaction: {
+        findFirst: jest
+          .fn()
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce({ id: 'tx-latest' }),
+      },
+      $queryRaw: jest.fn().mockResolvedValue([{ totalCount: 1 }]),
+    } as any;
+    const repo = new PaymentsRepository(repoPrisma);
+    const latest = await repo.findCurrentByOrderId('ORD-FALLBACK');
+    expect(latest.id).toBe('tx-latest');
+    await repo.listOrders({
+      startDate: new Date('2026-10-01'),
+      endDate: new Date('2026-11-01'),
+      page: 1,
+      pageSize: 10,
+    });
+
+    // 5. PaymentsService: capture branch in sync, VA without expiry
+    const mockRepo = {
+      findTransactionsForSync: jest.fn().mockResolvedValue([
+        {
+          id: 'tx-1',
+          orderId: 'ORD-1',
+          midtransOrderId: 'ORD-1-TX1',
+          status: 'PENDING',
+          amount: 100,
+        },
+      ]),
+      updateTransactionStatus: jest.fn(),
+      withOrderLock: jest.fn((id, cb) => cb({})),
+      findSuccessfulByOrderId: jest.fn().mockResolvedValue(null),
+      findPendingByOrderId: jest.fn().mockResolvedValue(null),
+      createTransaction: jest.fn().mockResolvedValue({ id: 't' }),
+    } as any;
+    const mockMidtrans = {
+      getTransactionStatus: jest.fn().mockResolvedValue({
+        statusCode: '200',
+        transactionStatus: 'capture',
+        fraudStatus: 'accept',
+        transactionId: 't1',
+      }),
+      createQrTransaction: jest.fn().mockResolvedValue({
+        orderId: 'Q',
+        transactionStatus: '',
+        requestPayload: {},
+        rawResponse: {},
+      }),
+      createVirtualAccount: jest.fn().mockResolvedValue({
+        bank: 'bca',
+        vaNumber: '1',
+        expiryTime: undefined,
+        requestPayload: {},
+        rawResponse: {},
+      }),
+    } as any;
+    const mockIdempotency = { execute: jest.fn((s, k, d, cb) => cb()) } as any;
+    const paymentsSvc = new PaymentsService(
+      mockRepo,
+      mockMidtrans,
+      { findEnabledBank: jest.fn().mockResolvedValue({ code: 'bca' }) } as any,
+      { emit: jest.fn() } as any,
+      mockIdempotency,
+    );
+    await paymentsSvc.syncPaymentStatus('ORD-1');
+    await paymentsSvc.createQrPayment({ orderId: 'ORD-1', amount: 100 });
+    await paymentsSvc.createVirtualAccountPayment({
+      orderId: 'ORD-1',
+      amount: 100,
+      bank: 'bca',
+    });
+
+    // 6. WebhooksService: settlement webhook without settlement_time
+    const webhookPrisma = {
+      webhookEvent: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn(),
+      },
+      paymentTransaction: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'tx',
+          status: 'PENDING',
+          amount: 100,
+          orderId: 'O',
+        }),
+        update: jest.fn(),
+      },
+      $transaction: jest.fn((cb) => cb(webhookPrisma)),
+    } as any;
+    const webhookSvc = new WebhooksService(
+      webhookPrisma,
+      { verifySignatureKey: jest.fn().mockReturnValue(true) } as any,
+      { emit: jest.fn() } as any,
+    );
+    await webhookSvc.handleMidtransWebhook({
+      order_id: 'O',
+      status_code: '200',
+      gross_amount: '100',
+      signature_key: 'sig',
+      transaction_id: 't',
+      transaction_status: 'settlement',
+      settlement_time: undefined,
+    } as any);
   });
 });
