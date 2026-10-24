@@ -340,6 +340,35 @@
         ]
       }
     },
+    "/api/v1/invoices/{id}/qr": {
+      "post": {
+        "operationId": "InvoicesController_generateQr",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Generate dynamic QRIS code for invoice payment",
+        "tags": [
+          "Invoices"
+        ]
+      }
+    },
     "/api/v1/webhooks/midtrans": {
       "post": {
         "operationId": "WebhooksController_handleMidtransWebhook",

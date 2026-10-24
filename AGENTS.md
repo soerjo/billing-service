@@ -27,7 +27,6 @@ Billing API built with NestJS. It manages invoices and payment flows through Pos
 - `src/modules/midtrans/` — payment provider integration.
 - `src/modules/webhooks/` — provider webhook validation and settlement handling.
 - `src/modules/outbox/` — durable event storage and publication/fallback processing.
-- `src/modules/reports/` — sales reporting.
 - `src/modules/metrics/` and `src/modules/health/` — observability endpoints/services.
 - `prisma/` — PostgreSQL schema and migrations.
 - `test/` — e2e configuration and setup.

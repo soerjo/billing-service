@@ -1,16 +1,15 @@
 # Billing Service
 
-Centralized billing API for invoice management, Midtrans payments, payment webhooks, reporting, and event delivery. The service is built with NestJS, TypeScript, Prisma, PostgreSQL, and Bun.
+Centralized billing integration API for invoice management, Midtrans payments, payment webhooks, and event delivery. The service is built with NestJS, TypeScript, Prisma, PostgreSQL, and Bun.
 
 ## Capabilities
 
 - Invoice creation and retrieval
-- Midtrans Snap checkout and QRIS generation
+- Midtrans checkout and QRIS payment initiation
 - Public Midtrans webhook handling with SHA-512 signature validation
 - Idempotent payment settlement processing
 - Transactional outbox events with Kafka publication and fallback relay
-- Sales and revenue reporting
-- JWT-protected API endpoints
+- JWT-protected invoice and payment endpoints
 - Health checks, structured request logging, Prometheus metrics, and Swagger/OpenAPI documentation
 
 ## Runtime and package manager
@@ -84,7 +83,6 @@ These endpoints require a Bearer JWT.
 | `GET` | `/api/v1/invoices/:id` | Retrieve invoice details and transactions |
 | `POST` | `/api/v1/invoices/:id/checkout` | Create a Midtrans Snap checkout transaction |
 | `POST` | `/api/v1/invoices/:id/qr` | Generate a QRIS payment response |
-| `GET` | `/api/v1/reports/sales` | Retrieve the sales and revenue report |
 
 ### Operational endpoints
 
@@ -134,8 +132,7 @@ src/
     midtrans/             Midtrans integration
     webhooks/             Webhook validation and settlement handling
     outbox/               Durable event storage and relay
-    reports/              Sales reporting
-    health/               Database health endpoint
+    health/                Database health endpoint
     metrics/              Prometheus metrics
 ```
 
