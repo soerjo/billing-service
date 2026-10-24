@@ -10,7 +10,9 @@ export class ReportsController {
   constructor(private readonly reportsService: ReportsService) {}
 
   @Get('sales')
-  @ApiOperation({ summary: 'Get comprehensive sales and revenue financial report' })
+  @ApiOperation({
+    summary: 'Get comprehensive sales and revenue financial report',
+  })
   async getSalesReport(@Query() query: SalesReportQueryDto) {
     return this.reportsService.getSalesReport(query);
   }

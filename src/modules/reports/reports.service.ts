@@ -19,7 +19,9 @@ export class ReportsService {
     if (query.startDate || query.endDate) {
       whereClause.createdAt = {};
       if (query.startDate) {
-        whereClause.createdAt.gte = new Date(`${query.startDate}T00:00:00.000Z`);
+        whereClause.createdAt.gte = new Date(
+          `${query.startDate}T00:00:00.000Z`,
+        );
       }
       if (query.endDate) {
         whereClause.createdAt.lte = new Date(`${query.endDate}T23:59:59.999Z`);
@@ -36,7 +38,10 @@ export class ReportsService {
 
     let grossRevenue = 0;
     let paidInvoicesCount = 0;
-    const channelMap = new Map<string, { totalAmount: number; count: number }>();
+    const channelMap = new Map<
+      string,
+      { totalAmount: number; count: number }
+    >();
     const trendMap = new Map<string, { revenue: number; count: number }>();
 
     for (const inv of invoices) {
@@ -63,14 +68,20 @@ export class ReportsService {
     }
 
     const totalInvoices = invoices.length;
-    const netRevenue = Array.from(channelMap.values()).reduce((acc, c) => acc + c.totalAmount, 0);
-    const averageOrderValue = paidInvoicesCount > 0 ? Math.round(netRevenue / paidInvoicesCount) : 0;
+    const netRevenue = Array.from(channelMap.values()).reduce(
+      (acc, c) => acc + c.totalAmount,
+      0,
+    );
+    const averageOrderValue =
+      paidInvoicesCount > 0 ? Math.round(netRevenue / paidInvoicesCount) : 0;
 
-    const paymentBreakdown = Array.from(channelMap.entries()).map(([channel, data]) => ({
-      channel,
-      totalAmount: data.totalAmount,
-      count: data.count,
-    }));
+    const paymentBreakdown = Array.from(channelMap.entries()).map(
+      ([channel, data]) => ({
+        channel,
+        totalAmount: data.totalAmount,
+        count: data.count,
+      }),
+    );
 
     const dailyTrend = Array.from(trendMap.entries()).map(([date, data]) => ({
       date,

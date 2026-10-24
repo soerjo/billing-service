@@ -1,117 +1,213 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Billing Service
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Centralized billing API for invoice management, Midtrans payments, payment webhooks, reporting, and event delivery. The service is built with NestJS, TypeScript, Prisma, PostgreSQL, and Bun.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Capabilities
 
-## Description
+- Invoice creation and retrieval
+- Midtrans Snap checkout and QRIS generation
+- Public Midtrans webhook handling with SHA-512 signature validation
+- Idempotent payment settlement processing
+- Transactional outbox events with Kafka publication and fallback relay
+- Sales and revenue reporting
+- JWT-protected API endpoints
+- Health checks, structured request logging, Prometheus metrics, and Swagger/OpenAPI documentation
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Runtime and package manager
 
-## Project setup
+Bun is required for installation, scripts, tests, and application runtime.
 
 ```bash
-$ bun install
+bun install
 ```
 
-## Compile and run the project
+Do not use npm, Yarn, pnpm, `node`, or Node-based test runners. The committed lockfile is `bun.lock`.
+
+## Quick start
+
+1. Copy `.env.example` to `.env` and provide the required values.
+2. Start PostgreSQL and the application dependencies, or use the local Compose stack:
 
 ```bash
-# development
-$ bun run start
-
-# watch mode
-$ bun run start:dev
-
-# production mode
-$ bun run start:prod
+docker compose up -d
 ```
 
-## Run tests
+3. Apply the database schema:
 
 ```bash
-# unit tests
-$ bun run test
-
-# e2e tests
-$ bun run test:e2e
-
-# test coverage
-$ bun run test:cov
+bunx prisma migrate dev
 ```
 
-## Environment variables
-
-Create a `.env` file (see `.env.example`) before running the app. Key variables:
-
-| Variable                 | Required | Default       | Description                                                                       |
-| ------------------------ | -------- | ------------- | --------------------------------------------------------------------------------- |
-| `NODE_ENV`               | No       | `development` | development \| production \| test                                                 |
-| `PORT`                   | No       | `3000`        | Server port                                                                       |
-| `DATABASE_URL`           | Yes      | —             | PostgreSQL connection string                                                      |
-| `JWT_ACCESS_SECRET`      | Yes      | —             | Signs access tokens                                                               |
-| `JWT_REFRESH_SECRET`     | Yes      | —             | Signs refresh tokens                                                              |
-| `JWT_ACCESS_EXPIRATION`  | No       | `15m`         | Access token expiry (`s`/`m`/`h`/`d` suffix, or bare seconds)                      |
-| `JWT_REFRESH_EXPIRATION` | No       | `7d`          | Refresh token expiry (`s`/`m`/`h`/`d` suffix, or bare seconds)                     |
-| `GOOGLE_CLIENT_ID`       | Yes      | —             | Google OAuth client ID                                                            |
-| `GOOGLE_CLIENT_SECRET`   | Yes      | —             | Google OAuth client secret                                                        |
-| `GOOGLE_CALLBACK_URL`    | No       | see `.env.example` | Google OAuth callback URL                                                    |
-| `FRONTEND_URL`           | No       | `http://localhost:5173` | Frontend base URL (Google OAuth redirect)                                |
-| `CORS_ORIGINS`           | No       | —             | Comma-separated allowed origins; unset/empty enables CORS for all origins (dev)   |
-
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+4. Start the development server:
 
 ```bash
-$ bun install -g @nestjs/mau
-$ mau deploy
+bun run start:dev
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+The default local application port is `3000` when running directly. The development Compose stack exposes the container on port `5000` by default.
 
-## Resources
+## Development commands
 
-Check out a few resources that may come in handy when working with NestJS:
+| Command | Purpose |
+| --- | --- |
+| `bun install` | Install dependencies from `bun.lock` |
+| `bun run start` | Start the Nest application |
+| `bun run start:dev` | Start in watch mode |
+| `bun run start:debug` | Start in debug/watch mode |
+| `bun run build` | Build to `dist/` |
+| `bun run start:prod` | Run the built application with Bun |
+| `bun run lint` | Run ESLint with repository formatting rules |
+| `bun run format` | Format TypeScript source and tests |
+| `bunx prisma generate` | Generate the Prisma client |
+| `bunx prisma migrate dev` | Create/apply development migrations |
+| `bunx prisma migrate deploy` | Apply committed migrations in deployment environments |
+| `bun run docs:openapi` | Generate `contracts/openapi.json` |
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+## API
 
-## Support
+The application sets the global `/api` prefix. Swagger UI is available at `/docs`.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+### Public endpoints
 
-## Stay in touch
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/health` | Check database health |
+| `POST` | `/api/v1/webhooks/midtrans` | Receive Midtrans payment notifications |
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+### Authenticated endpoints
 
-## License
+These endpoints require a Bearer JWT.
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/invoices` | Create an invoice |
+| `GET` | `/api/v1/invoices/:id` | Retrieve invoice details and transactions |
+| `POST` | `/api/v1/invoices/:id/checkout` | Create a Midtrans Snap checkout transaction |
+| `POST` | `/api/v1/invoices/:id/qr` | Generate a QRIS payment response |
+| `GET` | `/api/v1/reports/sales` | Retrieve the sales and revenue report |
+
+### Operational endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/metrics` | Expose raw Prometheus metrics |
+| `GET` | `/docs` | Open Swagger UI |
+
+`/metrics` intentionally stays outside the `/api` prefix and response envelope so Prometheus can scrape the raw exposition format.
+
+## Configuration
+
+Create `.env` from `.env.example`. `DATABASE_URL` and the JWT configuration are required for normal operation. Payment and integration settings control Midtrans, Kafka, CORS, and frontend integration.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `NODE_ENV` | No | `development`, `test`, or `production` |
+| `PORT` | No | HTTP port; defaults to `3000` |
+| `JWT_ACCESS_SECRET` | Yes | Access-token signing secret |
+| `JWT_REFRESH_SECRET` | Yes | Refresh-token signing secret |
+| `JWT_ACCESS_EXPIRATION` | No | Access-token lifetime; defaults to `15m` |
+| `JWT_REFRESH_EXPIRATION` | No | Refresh-token lifetime; defaults to `7d` |
+| `MIDTRANS_SERVER_KEY` | Yes for real payments | Midtrans server credential |
+| `MIDTRANS_CLIENT_KEY` | Yes for real payments | Midtrans client credential |
+| `MIDTRANS_IS_PRODUCTION` | No | Select Midtrans production or sandbox URLs |
+| `KAFKA_BROKERS` | No | Comma-separated Kafka brokers |
+| `KAFKA_CLIENT_ID` | No | Kafka client identifier |
+| `CORS_ORIGINS` | No | Comma-separated allowed origins |
+| `FRONTEND_URL` | No | Frontend/OAuth redirect base URL |
+
+Do not commit `.env` or production credentials. Compose defaults such as `postgres/postgres` and `admin/admin` are for local development only.
+
+## Architecture
+
+The code is organized as a NestJS modular monolith:
+
+```text
+src/
+  main.ts                 HTTP bootstrap, global prefix, Swagger, metrics
+  app.module.ts           Application module composition
+  config/                 Environment validation and logging
+  common/                 Guards, decorators, filters, interceptors, middleware
+  prisma/                 Global Prisma service/module
+  modules/
+    invoices/             Invoice controller, service, repository, DTOs
+    midtrans/             Midtrans integration
+    webhooks/             Webhook validation and settlement handling
+    outbox/               Durable event storage and relay
+    reports/              Sales reporting
+    health/               Database health endpoint
+    metrics/              Prometheus metrics
+```
+
+Feature modules follow the pattern:
+
+```text
+Controller → Service → Repository → Prisma
+```
+
+Controllers own HTTP concerns and DTO binding. Services coordinate business workflows and integrations. Repositories are the Prisma query boundary. Expected client errors use Nest HTTP exceptions. Responses are transformed globally, and exceptions are normalized globally.
+
+The billing data model is defined in `prisma/schema.prisma` and includes `BillingAccount`, `Invoice`, `PaymentTransaction`, `WebhookEvent`, and `OutboxEvent`.
+
+## Local infrastructure
+
+`docker-compose.yml` starts:
+
+- Application container
+- PostgreSQL 15
+- Redis 7
+- Prometheus
+- Grafana
+
+Useful commands:
+
+```bash
+docker compose up -d
+docker compose logs -f app
+docker compose down
+```
+
+The optional `docker-compose.override.yml` changes host ports for local setups. Prometheus scrapes `/metrics`; Grafana loads the provisioned dashboard and Prometheus datasource.
+
+## Testing and quality gates
+
+Tests use Bun's built-in test runner. The repository enforces 100% line coverage for instrumented source files.
+
+```bash
+bun test
+bun run test:watch
+bun run test:cov
+bun run test:e2e
+```
+
+`bun run test:e2e` boots the complete Nest application and requires a reachable PostgreSQL database. Unit tests mock Prisma and external payment/event dependencies.
+
+Before opening a pull request, run:
+
+```bash
+bunx tsc --noEmit
+bun run lint
+bun run test:cov
+bun run build
+```
+
+CI runs Bun installation, Prisma client generation, lint, type checking, the coverage-gated test suite, and the production build.
+
+## Generated API contract
+
+Swagger generates the OpenAPI document from Nest decorators. To update the checked-in contract:
+
+```bash
+bun run docs:openapi
+```
+
+The generated file is `contracts/openapi.json`; update it when routes, DTOs, authentication, or response schemas change.
+
+## Repository conventions
+
+- Use Bun commands and keep `bun.lock` synchronized.
+- Use `.js` extensions in TypeScript imports because the project uses NodeNext module resolution.
+- Keep database access in repositories.
+- Add DTO validation and Swagger decorators for new request bodies and query parameters.
+- Preserve webhook idempotency and transactional outbox behavior.
+- Add behavioral tests for payment signatures, invoice state transitions, webhook processing, outbox relay behavior, and metrics.

@@ -62,8 +62,8 @@ jobs:
       - name: Generate Prisma client
         run: bunx prisma generate
 
-      - name: Run unit tests (metrics + middleware, explicit config)
-        run: bunx jest src/modules/metrics src/common/middleware --config jest.config.js
+      - name: Run unit tests and coverage
+        run: bun run test:cov
 
   build:
     runs-on: ubuntu-latest
