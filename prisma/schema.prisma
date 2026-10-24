@@ -7,14 +7,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum InvoiceStatus {
-  DRAFT
-  UNPAID
-  PAID
-  VOID
-  EXPIRED
-}
-
 enum PaymentProvider {
   MIDTRANS
   MANUAL
@@ -28,58 +20,54 @@ enum PaymentChannel {
   CREDIT_CARD
 }
 
-model BillingAccount {
-  id             String    @id @default(uuid())
-  organizationId String    @unique @map("organization_id") // Ref UMS Organization
-  name           String
-  email          String
-  phone          String?
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
-  invoices       Invoice[]
-
-  @@map("billing_accounts")
+enum PaymentStatus {
+  PENDING
+  CAPTURE
+  SETTLEMENT
+  DENY
+  CANCEL
+  EXPIRE
+  FAILURE
+  REFUND
+  CHARGEBACK
+  PARTIAL_REFUND
+  PARTIAL_CHARGEBACK
+  AUTHORIZE
 }
 
-model Invoice {
-  id               String               @id @default(uuid())
-  billingAccountId String               @map("billing_account_id")
-  billingAccount   BillingAccount       @relation(fields: [billingAccountId], references: [id], onDelete: Cascade)
-  invoiceNumber    String               @unique @map("invoice_number") // Format: INV-YYYYMMDD-XXXX
-  amount           Decimal              @db.Decimal(12, 2)
-  currency         String               @default("IDR")
-  status           InvoiceStatus        @default(UNPAID)
-  dueDate          DateTime             @map("due_date")
-  description      String?
-  paidAt           DateTime?            @map("paid_at")
-  metadata         Json?
-  createdAt        DateTime             @default(now()) @map("created_at")
-  updatedAt        DateTime             @updatedAt @map("updated_at")
-  transactions     PaymentTransaction[]
-
-  @@index([billingAccountId, status])
-  @@map("invoices")
+enum OutboxStatus {
+  PENDING
+  PROCESSED
+  FAILED
 }
 
 model PaymentTransaction {
   id                    String          @id @default(uuid())
-  invoiceId             String          @map("invoice_id")
-  invoice               Invoice         @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  orderId               String          @map("order_id") // External order/invoice ID from calling service
+  amount                Decimal         @map("gross_amount") @db.Decimal(12, 2)
+  currency              String          @default("IDR")
+  description           String?
+  metadata              Json?
   provider              PaymentProvider @default(MIDTRANS)
   channel               PaymentChannel  @default(SNAP_ALL)
-  grossAmount           Decimal         @map("gross_amount") @db.Decimal(12, 2)
-  status                String          // PENDING, SETTLEMENT, EXPIRE, CANCEL, DENY
+  status                PaymentStatus   @default(PENDING)
   midtransOrderId       String          @unique @map("midtrans_order_id")
   midtransTransactionId String?         @map("midtrans_transaction_id")
   snapToken             String?         @map("snap_token")
   snapRedirectUrl       String?         @map("snap_redirect_url")
+  vaBank                String?         @map("va_bank")
+  vaNumber              String?         @map("va_number")
+  vaExpiryTime          DateTime?       @map("va_expiry_time")
   signatureKey          String?         @map("signature_key")
   requestPayload        Json?           @map("request_payload")
   rawResponse           Json?           @map("raw_response")
+  paidAt                DateTime?       @map("paid_at")
   createdAt             DateTime        @default(now()) @map("created_at")
   updatedAt             DateTime        @updatedAt @map("updated_at")
 
-  @@index([invoiceId, status])
+  @@index([orderId])
+  @@index([status])
+  @@index([createdAt])
   @@map("payment_transactions")
 }
 
@@ -101,10 +89,22 @@ model OutboxEvent {
   aggregateId   String    @map("aggregate_id")   // invoiceId
   eventType     String    @map("event_type")     // INVOICE_PAID, INVOICE_EXPIRED
   payload       Json
-  status        String    @default("PENDING")    // PENDING, PROCESSED, FAILED
+  status        OutboxStatus @default(PENDING)
   createdAt     DateTime  @default(now()) @map("created_at")
   processedAt   DateTime? @map("processed_at")
 
   @@index([status, createdAt])
   @@map("outbox_events")
+}
+
+model VirtualAccountBank {
+  id        String   @id
+  code      String   @unique
+  name      String
+  enabled   Boolean  @default(true)
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("virtual_account_banks")
 }

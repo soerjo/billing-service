@@ -35,16 +35,16 @@ describe('OutboxService', () => {
   it('emits an outbox event to database', async () => {
     mockPrisma.outboxEvent.create.mockResolvedValue({ id: 'outbox-1' });
 
-    const result = await service.emit('INVOICE', 'inv-1', 'INVOICE_PAID', {
+    const result = await service.emit('PAYMENT', 'ord-1', 'PAYMENT_COMPLETED', {
       amount: 150000,
     });
 
     expect(result).toEqual({ id: 'outbox-1' });
     expect(mockPrisma.outboxEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        aggregateType: 'INVOICE',
-        aggregateId: 'inv-1',
-        eventType: 'INVOICE_PAID',
+        aggregateType: 'PAYMENT',
+        aggregateId: 'ord-1',
+        eventType: 'PAYMENT_COMPLETED',
         status: 'PENDING',
       }) as unknown,
     });
@@ -54,9 +54,9 @@ describe('OutboxService', () => {
     mockPrisma.outboxEvent.findMany.mockResolvedValue([
       {
         id: 'outbox-1',
-        aggregateType: 'INVOICE',
-        aggregateId: 'inv-1',
-        eventType: 'INVOICE_PAID',
+        aggregateType: 'PAYMENT',
+        aggregateId: 'ord-1',
+        eventType: 'PAYMENT_COMPLETED',
         payload: { amount: 150000 },
       },
     ]);

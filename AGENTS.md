@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Billing API built with NestJS. It manages invoices and payment flows through PostgreSQL/Prisma, integrates with Midtrans checkout and webhooks, publishes events through a Kafka-oriented transactional outbox, and exposes JWT-protected APIs, Swagger, health checks, and Prometheus metrics.
+Payment integration service built with NestJS. It initiates and tracks payment flows through PostgreSQL/Prisma, integrates with Midtrans checkout, QRIS, and Virtual Accounts, processes payment webhooks, publishes events through a Kafka-oriented transactional outbox, and exposes service-to-service protected APIs, Swagger, health checks, and Prometheus metrics.
 
 ## Architecture & Data Flow
 
@@ -13,8 +13,8 @@ Billing API built with NestJS. It manages invoices and payment flows through Pos
   - Services implement business workflows and coordinate integrations.
   - Repositories are the Prisma query boundary and raise `NotFoundException` for missing records.
 - `src/prisma/prisma.module.ts` is global; `PrismaService` is shared across modules.
-- Invoice creation (`POST /api/v1/invoices`) upserts a billing account, generates `INV-YYYYMMDD-XXXX`, converts amounts to `Prisma.Decimal`, creates an `UNPAID` invoice, and returns related data.
-- Payment checkout and webhooks use dedicated Midtrans services. Webhook processing is idempotent and writes outbox events for downstream publication.
+- Payment initiation (`POST /api/v1/payments/{snap,qr,virtual-account}`) creates Midtrans transactions, tracks `PaymentTransaction` attempts per external `orderId`, and returns checkout tokens/VA details.
+- Webhook processing (`POST /api/v1/webhooks/midtrans`) is idempotent, updates payment transaction status, and writes outbox events (`PAYMENT_COMPLETED`, `PAYMENT_FAILED`) for downstream publication.
 - Successful responses use `ResponseTransformInterceptor`; exceptions use `AllExceptionsFilter`. Expected client failures should use Nest HTTP exceptions.
 - `/metrics` is intentionally raw Prometheus output and is outside the `/api` prefix and normal response envelope.
 
@@ -23,7 +23,8 @@ Billing API built with NestJS. It manages invoices and payment flows through Pos
 - `src/config/` — environment validation and logger configuration.
 - `src/common/` — guards, decorators, filters, interceptors, middleware, and shared utilities.
 - `src/prisma/` — Prisma module/service.
-- `src/modules/invoices/` — invoice controller, service, repository, DTOs.
+- `src/modules/payments/` — payment controller, service, repository, DTOs.
+- `src/modules/payment-methods/` — virtual account bank catalog.
 - `src/modules/midtrans/` — payment provider integration.
 - `src/modules/webhooks/` — provider webhook validation and settlement handling.
 - `src/modules/outbox/` — durable event storage and publication/fallback processing.
@@ -64,7 +65,7 @@ Use `bun run start:prod` after building. `docker-compose.yml` provides local app
 
 - `src/main.ts` — application bootstrap and global HTTP pipeline.
 - `src/app.module.ts` — module composition and global infrastructure.
-- `src/modules/invoices/invoices.controller.ts` / `invoices.service.ts` / `invoices.repository.ts` — representative feature layering.
+- `src/modules/payments/payments.controller.ts` / `payments.service.ts` / `payments.repository.ts` — representative feature layering.
 - `src/modules/webhooks/` — payment settlement and idempotency behavior.
 - `src/common/filters/all-exceptions.filter.ts` — normalized error envelope.
 - `src/common/interceptors/response-transform.interceptor.ts` — success envelope.
@@ -105,4 +106,4 @@ bun run test:cov
 bun run build
 ```
 
-- Add tests for consumer-visible behavior, especially payment signatures, webhook idempotency, invoice state transitions, validation, and metrics labels.
+- Add tests for consumer-visible behavior, especially payment signatures, webhook idempotency, payment state transitions, validation, and metrics labels.

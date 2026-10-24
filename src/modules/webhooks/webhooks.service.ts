@@ -2,21 +2,10 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { MidtransService } from '../midtrans/midtrans.service.js';
 import { OutboxService } from '../outbox/outbox.service.js';
-import { InvoiceStatus, Prisma } from '@prisma/client';
+import { PaymentStatus, Prisma } from '@prisma/client';
+import { MidtransWebhookDto } from './dto/midtrans-webhook.dto.js';
 
-export interface MidtransWebhookPayload {
-  order_id: string;
-  status_code: string;
-  gross_amount: string;
-  signature_key: string;
-  transaction_id: string;
-  transaction_status: string;
-  fraud_status?: string;
-  payment_type?: string;
-  settlement_time?: string;
-  [key: string]: unknown;
-}
-
+export type MidtransWebhookPayload = MidtransWebhookDto;
 @Injectable()
 export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
@@ -47,20 +36,20 @@ export class WebhooksService {
     });
 
     if (!isValidSignature) {
-      this.logger.warn(`Invalid signature for order ${order_id}`);
-      throw new BadRequestException('Invalid signature key');
+      this.logger.warn(`Invalid signature for webhook order ${order_id}`);
+      throw new BadRequestException('Invalid signature');
     }
+
+    const eventId = `${transaction_id}:${status_code}:${transaction_status}`;
 
     // 2. Idempotency check via WebhookEvent
     const existingEvent = await this.prisma.webhookEvent.findUnique({
-      where: { eventId: transaction_id },
+      where: { eventId },
     });
 
     if (existingEvent) {
-      this.logger.log(
-        `Webhook event ${transaction_id} for order ${order_id} already processed. Skipping.`,
-      );
-      return { status: 'ALREADY_PROCESSED', eventId: transaction_id };
+      this.logger.log(`Webhook event ${eventId} already processed, skipping`);
+      return { status: 'ALREADY_PROCESSED', eventId };
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -68,21 +57,16 @@ export class WebhooksService {
       await tx.webhookEvent.create({
         data: {
           provider: 'MIDTRANS',
-          eventId: transaction_id,
+          eventId,
           orderId: order_id,
           signatureKey: signature_key,
           payload: payload as unknown as Prisma.InputJsonValue,
         },
       });
 
-      // Find transaction
+      // Find transaction by Midtrans order id
       const transaction = await tx.paymentTransaction.findUnique({
         where: { midtransOrderId: order_id },
-        include: {
-          invoice: {
-            include: { billingAccount: true },
-          },
-        },
       });
 
       if (!transaction) {
@@ -90,60 +74,95 @@ export class WebhooksService {
         return { status: 'TRANSACTION_NOT_FOUND', orderId: order_id };
       }
 
-      const normalizedStatus = transaction_status.toUpperCase();
+      const normalizedStatus =
+        transaction_status.toUpperCase() as PaymentStatus;
+      const isPaid =
+        transaction_status === 'settlement' ||
+        (transaction_status === 'capture' && fraud_status === 'accept');
+      const isFailed =
+        transaction_status === 'deny' ||
+        transaction_status === 'cancel' ||
+        transaction_status === 'expire';
+      const wasPaid = ['SETTLEMENT', 'CAPTURE'].includes(
+        transaction.status.toUpperCase(),
+      );
+      const wasFailed = ['DENY', 'CANCEL', 'EXPIRE'].includes(
+        transaction.status.toUpperCase(),
+      );
 
-      // Update transaction status
+      const paidAt = isPaid
+        ? payload.settlement_time
+          ? new Date(payload.settlement_time)
+          : new Date()
+        : undefined;
+
+      // Update transaction record
       await tx.paymentTransaction.update({
         where: { id: transaction.id },
         data: {
           status: normalizedStatus,
           midtransTransactionId: transaction_id,
           rawResponse: payload as unknown as Prisma.InputJsonValue,
+          paidAt: paidAt || transaction.paidAt,
         },
       });
 
-      // Check if payment is successful
-      const isPaid =
-        transaction_status === 'settlement' ||
-        (transaction_status === 'capture' && fraud_status === 'accept');
-
-      if (isPaid && transaction.invoice.status !== InvoiceStatus.PAID) {
-        const paidAt = payload.settlement_time
-          ? new Date(payload.settlement_time)
-          : new Date();
-
-        await tx.invoice.update({
-          where: { id: transaction.invoice.id },
-          data: {
-            status: InvoiceStatus.PAID,
-            paidAt,
-          },
-        });
-
-        // Emit outbox event for Kafka publishing
+      // Emit outbox events for Kafka publishing
+      if (isPaid && !wasPaid) {
         await this.outboxService.emit(
-          'INVOICE',
-          transaction.invoice.id,
-          'INVOICE_PAID',
+          'PAYMENT',
+          transaction.orderId,
+          'PAYMENT_COMPLETED',
           {
-            eventId: transaction_id,
-            eventType: 'INVOICE_PAID',
-            invoiceId: transaction.invoice.id,
-            invoiceNumber: transaction.invoice.invoiceNumber,
-            organizationId: transaction.invoice.billingAccount.organizationId,
-            amount: Number(transaction.invoice.amount),
-            paidAt: paidAt.toISOString(),
-            metadata: transaction.invoice.metadata,
+            eventId,
+            eventType: 'PAYMENT_COMPLETED',
+            orderId: transaction.orderId,
+            transactionId: transaction.id,
+            midtransOrderId: transaction.midtransOrderId,
+            midtransTransactionId: transaction_id,
+            amount: Number(transaction.amount),
+            currency: transaction.currency,
+            paymentType: payload.payment_type || transaction.channel,
+            settledAt: (paidAt || new Date()).toISOString(),
+            metadata: transaction.metadata,
           },
           tx,
         );
 
         this.logger.log(
-          `Invoice ${transaction.invoice.invoiceNumber} marked as PAID via Midtrans webhook`,
+          `Payment for order ${transaction.orderId} (tx: ${transaction.midtransOrderId}) completed via Midtrans webhook`,
+        );
+      } else if (isFailed && !wasFailed) {
+        await this.outboxService.emit(
+          'PAYMENT',
+          transaction.orderId,
+          'PAYMENT_FAILED',
+          {
+            eventId,
+            eventType: 'PAYMENT_FAILED',
+            orderId: transaction.orderId,
+            transactionId: transaction.id,
+            midtransOrderId: transaction.midtransOrderId,
+            midtransTransactionId: transaction_id,
+            amount: Number(transaction.amount),
+            currency: transaction.currency,
+            paymentType: payload.payment_type || transaction.channel,
+            status: normalizedStatus,
+            metadata: transaction.metadata,
+          },
+          tx,
+        );
+
+        this.logger.warn(
+          `Payment for order ${transaction.orderId} (tx: ${transaction.midtransOrderId}) marked as ${normalizedStatus} via Midtrans webhook`,
         );
       }
 
-      return { status: 'PROCESSED', eventId: transaction_id };
+      return {
+        status: 'PROCESSED',
+        eventId,
+        paymentStatus: normalizedStatus,
+      };
     });
   }
 }

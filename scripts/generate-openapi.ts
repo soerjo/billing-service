@@ -7,9 +7,6 @@ import { dirname, resolve } from 'node:path';
 process.env.NODE_ENV = 'test';
 process.env.DATABASE_URL =
   process.env.DATABASE_URL || 'postgresql://user:pass@localhost:5432/billing_db';
-process.env.UMS_JWT_PUBLIC_KEY =
-  process.env.UMS_JWT_PUBLIC_KEY ||
-  '-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Y8+test\n-----END PUBLIC KEY-----';
 process.env.MIDTRANS_SERVER_KEY =
   process.env.MIDTRANS_SERVER_KEY || 'SB-Mid-server-testkey12345';
 process.env.MIDTRANS_CLIENT_KEY =
@@ -25,10 +22,10 @@ async function generate() {
   app.setGlobalPrefix('api');
 
   const config = new DocumentBuilder()
-    .setTitle('Billing API')
-    .setDescription('Centralized Billing Service & Midtrans Integration API documentation')
+    .setTitle('Payment Integration API')
+    .setDescription('Payment Gateway Integration & Midtrans Adapter API documentation')
     .setVersion('1.0.0')
-    .addBearerAuth()
+    .addApiKey({ type: 'apiKey', name: 'X-Api-Key', in: 'header' }, 'api-key')
     .build();
 
   const document = SwaggerModule.createDocument(app, config);

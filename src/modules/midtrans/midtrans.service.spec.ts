@@ -3,6 +3,7 @@ import { MidtransService } from './midtrans.service.js';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
 
+import { ServiceUnavailableException } from '@nestjs/common';
 describe('MidtransService', () => {
   let service: MidtransService;
 
@@ -58,5 +59,38 @@ describe('MidtransService', () => {
 
       expect(isValid).toBe(false);
     });
+  });
+
+  it('returns a service-unavailable error when VA credentials are missing', async () => {
+    const serviceWithoutKey = new MidtransService({
+      get: jest.fn((key: string) =>
+        key === 'MIDTRANS_SERVER_KEY' ? '' : false,
+      ),
+    } as unknown as ConfigService);
+
+    await expect(
+      serviceWithoutKey.createVirtualAccount({
+        orderId: 'ORD-NO-KEY',
+        grossAmount: 100000,
+        bank: 'bca',
+      }),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
+  it('returns a mock QRIS transaction when server key is not configured', async () => {
+    const serviceWithoutKey = new MidtransService({
+      get: jest.fn((key: string) =>
+        key === 'MIDTRANS_SERVER_KEY' ? '' : false,
+      ),
+    } as unknown as ConfigService);
+
+    const res = await serviceWithoutKey.createQrTransaction({
+      orderId: 'ORD-MOCK-QR',
+      grossAmount: 50000,
+    });
+
+    expect(res.orderId).toBe('ORD-MOCK-QR');
+    expect(res.qrString).toBeDefined();
+    expect(res.qrImageUrl).toContain('/v2/qris/mock-ORD-MOCK-QR/qr-code');
   });
 });

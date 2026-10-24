@@ -1,13 +1,24 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return */
 import { Kafka } from 'kafkajs';
 import axios from 'axios';
-import { InvoiceStatus, PaymentChannel } from '@prisma/client';
-import { InvoicesRepository } from './modules/invoices/invoices.repository.js';
-import { InvoicesService } from './modules/invoices/invoices.service.js';
+import { validate } from 'class-validator';
+import { PaymentChannel, PaymentProvider } from '@prisma/client';
+import { ListPaymentOrdersDto } from './modules/payments/dto/list-payment-orders.dto.js';
+import { PaymentsRepository } from './modules/payments/payments.repository.js';
+import { PaymentsController } from './modules/payments/payments.controller.js';
+import { PaymentMethodsService } from './modules/payment-methods/payment-methods.service.js';
+import { PaymentMethodsController } from './modules/payment-methods/payment-methods.controller.js';
+import { WebhooksController } from './modules/webhooks/webhooks.controller.js';
+import { SignaturesController } from './modules/signatures/signatures.controller.js';
+import { SignaturesService } from './modules/signatures/signatures.service.js';
 import { MidtransService } from './modules/midtrans/midtrans.service.js';
 import { OutboxService } from './modules/outbox/outbox.service.js';
 import { PrismaService } from './prisma/prisma.service.js';
+import { ApiKeyGuard } from './common/guards/api-key.guard.js';
 import { createRequestLoggingMiddleware } from './common/middleware/request-logging.middleware.js';
+import { validate as validateEnvironment } from './config/env.validation.js';
+import { NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { generateHmacSignature } from './common/utils/signature.util.js';
 
 describe('coverage gaps', () => {
   it('covers request logging finish and metrics skip', () => {
@@ -21,233 +32,700 @@ describe('coverage gaps', () => {
 
     const listeners: Record<string, () => void> = {};
     const response = {
-      statusCode: 201,
+      statusCode: 200,
       on: jest.fn((event: string, callback: () => void) => {
         listeners[event] = callback;
       }),
     } as any;
     const request = {
-      path: '/api/invoices',
+      path: '/api/v1/payments/snap',
       method: 'POST',
-      originalUrl: '/api/invoices',
-      route: { path: '/api/invoices' },
+      originalUrl: '/api/v1/payments/snap',
+      route: { path: '/api/v1/payments/snap' },
     } as any;
     middleware(request, response, next);
     listeners.finish();
     expect(logger.info).toHaveBeenCalled();
     expect(metrics.recordRequest).toHaveBeenCalledWith(
       'POST',
-      '/api/invoices',
-      201,
+      '/api/v1/payments/snap',
+      200,
       expect.any(Number),
     );
   });
 
-  it('covers invoice repository operations and status updates', async () => {
-    const prisma = {
-      billingAccount: { upsert: jest.fn().mockResolvedValue({ id: 'ba' }) },
-      invoice: {
-        count: jest.fn().mockResolvedValue(2),
-        create: jest.fn().mockResolvedValue({ id: 'i' }),
-        findUnique: jest.fn(),
-        update: jest.fn().mockResolvedValue({ id: 'i' }),
-      },
-      paymentTransaction: { create: jest.fn().mockResolvedValue({ id: 't' }) },
+  it('validates required payment order date range', async () => {
+    const query = new ListPaymentOrdersDto();
+    query.startDate = '2026-10-01T00:00:00.000Z';
+    query.endDate = '2026-11-01T00:00:00.000Z';
+    query.page = 1;
+    query.pageSize = 50;
+    expect(await validate(query)).toHaveLength(0);
+
+    const invalid = new ListPaymentOrdersDto();
+    invalid.status = 'UNKNOWN' as never;
+    invalid.page = 0;
+    invalid.pageSize = 101;
+    expect(await validate(invalid)).not.toHaveLength(0);
+  });
+  it('parses string boolean environment flags correctly', () => {
+    const config = validateEnvironment({
+      NODE_ENV: 'development',
+      DATABASE_URL: 'postgresql://localhost/test',
+      MIDTRANS_IS_PRODUCTION: 'false',
+      KAFKA_ENABLED: 'false',
+    });
+
+    expect(config.MIDTRANS_IS_PRODUCTION).toBe(false);
+    expect(config.KAFKA_ENABLED).toBe(false);
+  });
+  it('rejects invalid environment configuration', () => {
+    expect(() => validateEnvironment({ NODE_ENV: 'development' })).toThrow();
+  });
+  it('covers ApiKeyGuard all branches', () => {
+    const reflector = {
+      getAllAndOverride: jest.fn(),
     } as any;
-    const repository = new InvoicesRepository(prisma);
-    await repository.findOrCreateBillingAccount('org');
-    await repository.findOrCreateBillingAccount('org', 'Name', 'email');
-    await repository.countInvoicesToday(new Date(0), new Date());
-    await repository.create({} as any);
-    prisma.invoice.findUnique.mockResolvedValueOnce(null);
-    await expect(repository.findById('missing')).rejects.toThrow();
-    prisma.invoice.findUnique.mockResolvedValueOnce({ id: 'i' });
-    await repository.findById('i');
-    await repository.findByInvoiceNumber('INV-1');
-    await repository.createTransaction({
-      invoiceId: 'i',
-      midtransOrderId: 'o',
-      grossAmount: 1,
-    });
-    await repository.createTransaction({
-      invoiceId: 'i',
-      midtransOrderId: 'o',
-      grossAmount: 1,
-      provider: 'MIDTRANS',
-      channel: PaymentChannel.QRIS,
-      status: 'PAID',
-    });
-    await repository.updateInvoiceStatus('i', InvoiceStatus.PAID);
-    await repository.updateInvoiceStatus(
-      'i',
-      InvoiceStatus.UNPAID,
-      new Date(0),
-      {
-        invoice: { update: jest.fn().mockResolvedValue({}) },
-      } as any,
+    const configService = {
+      get: jest.fn(),
+    } as any;
+
+    const guard = new ApiKeyGuard(reflector, configService);
+
+    const makeContext = (
+      headers: Record<string, string | undefined>,
+      method = 'GET',
+      url = '/api/v1/payments',
+      body?: unknown,
+    ) =>
+      ({
+        getHandler: jest.fn(),
+        getClass: jest.fn(),
+        switchToHttp: () => ({
+          getRequest: () => ({ headers, method, url, body }),
+        }),
+      }) as any;
+
+    // 1. Public route
+    reflector.getAllAndOverride.mockReturnValueOnce(true);
+    expect(guard.canActivate(makeContext({}))).toBe(true);
+
+    // 2. Not public, API_KEY not set in dev/test
+    reflector.getAllAndOverride.mockReturnValue(false);
+    configService.get.mockReturnValue(undefined);
+    const origEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
+    expect(guard.canActivate(makeContext({}))).toBe(true);
+
+    // 3. Not public, API_KEY not set in production -> UnauthorizedException
+    process.env.NODE_ENV = 'production';
+    expect(() => guard.canActivate(makeContext({}))).toThrow(
+      UnauthorizedException,
     );
-    expect(prisma.invoice.update).toHaveBeenCalled();
+    process.env.NODE_ENV = origEnv;
+
+    // 4. API_KEY configured: invalid / missing key
+    configService.get.mockReturnValue('secret-key-123');
+    expect(() =>
+      guard.canActivate(makeContext({ 'x-api-key': 'wrong' })),
+    ).toThrow(UnauthorizedException);
+    expect(() => guard.canActivate(makeContext({}))).toThrow(
+      UnauthorizedException,
+    );
+
+    // 5. API_KEY valid, skip signature decorator
+    reflector.getAllAndOverride
+      .mockReturnValueOnce(false) // isPublic
+      .mockReturnValueOnce(true); // skipSignature
+    expect(
+      guard.canActivate(makeContext({ 'x-api-key': 'secret-key-123' })),
+    ).toBe(true);
+
+    // 6. Signature checks: missing X-Signature
+    reflector.getAllAndOverride.mockReturnValue(false);
+    expect(() =>
+      guard.canActivate(makeContext({ 'x-api-key': 'secret-key-123' })),
+    ).toThrow('Missing X-Signature header');
+
+    // 7. Signature checks: missing X-Timestamp
+    expect(() =>
+      guard.canActivate(
+        makeContext({
+          'x-api-key': 'secret-key-123',
+          'x-signature': 'sig',
+        }),
+      ),
+    ).toThrow('Missing X-Timestamp header');
+
+    // 8. Signature checks: invalid timestamp format
+    expect(() =>
+      guard.canActivate(
+        makeContext({
+          'x-api-key': 'secret-key-123',
+          'x-signature': 'sig',
+          'x-timestamp': 'not-a-date',
+        }),
+      ),
+    ).toThrow('Invalid X-Timestamp header format');
+
+    // 9. Signature checks: expired timestamp (> 5 mins)
+    const oldTs = (Date.now() - 10 * 60 * 1000).toString();
+    expect(() =>
+      guard.canActivate(
+        makeContext({
+          'x-api-key': 'secret-key-123',
+          'x-signature': 'sig',
+          'x-timestamp': oldTs,
+        }),
+      ),
+    ).toThrow('Request signature expired');
+
+    // 10. Signature checks: invalid signature
+    const nowTs = Date.now().toString();
+    expect(() =>
+      guard.canActivate(
+        makeContext({
+          'x-api-key': 'secret-key-123',
+          'x-signature': 'invalid-signature-hex',
+          'x-timestamp': nowTs,
+        }),
+      ),
+    ).toThrow('Invalid request signature');
+
+    // 11. Valid signature via x-api-key
+    const validSig = generateHmacSignature(
+      `GET:/api/v1/payments:${nowTs}:`,
+      'secret-key-123',
+    );
+    expect(
+      guard.canActivate(
+        makeContext({
+          'x-api-key': 'secret-key-123',
+          'x-signature': validSig,
+          'x-timestamp': nowTs,
+        }),
+      ),
+    ).toBe(true);
+
+    // 12. Valid signature via Bearer auth
+    expect(
+      guard.canActivate(
+        makeContext({
+          authorization: 'Bearer secret-key-123',
+          'x-signature': validSig,
+          'x-timestamp': nowTs,
+        }),
+      ),
+    ).toBe(true);
   });
 
-  it('covers invoice checkout and QR branches', async () => {
-    const repository = {
-      findOrCreateBillingAccount: jest.fn().mockResolvedValue({ id: 'ba' }),
-      countInvoicesToday: jest.fn().mockResolvedValue(0),
-      create: jest.fn().mockResolvedValue({ id: 'i', invoiceNumber: 'INV-1' }),
-      findById: jest.fn(),
-      createTransaction: jest.fn().mockResolvedValue({ id: 'tx' }),
+  it('covers payments repository operations', async () => {
+    const prisma = {
+      paymentTransaction: {
+        create: jest.fn().mockResolvedValue({ id: 'tx-1' }),
+        findMany: jest.fn().mockResolvedValue([{ id: 'tx-1' }]),
+        findFirst: jest.fn(),
+        findUnique: jest.fn().mockResolvedValue({ id: 'tx-1' }),
+        update: jest.fn().mockResolvedValue({ id: 'tx-1' }),
+      },
+      $queryRaw: jest.fn().mockResolvedValue([
+        {
+          orderId: 'ORD-1',
+          id: 'tx-1',
+          midtransOrderId: 'ORD-1-TX1',
+          amount: 100,
+          currency: 'IDR',
+          channel: PaymentChannel.SNAP_ALL,
+          status: 'PENDING',
+          paidAt: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ]),
+      $transaction: jest.fn((callback: (tx: any) => unknown) =>
+        Promise.resolve(
+          callback({
+            $executeRaw: jest.fn().mockResolvedValue(1),
+          }),
+        ),
+      ),
     } as any;
-    const midtrans = {
-      createSnapTransaction: jest.fn().mockResolvedValue({
-        token: 'token',
-        redirect_url: 'url',
-        requestPayload: {},
-        rawResponse: {},
+
+    const repository = new PaymentsRepository(prisma);
+
+    // create with defaults
+    await repository.createTransaction({
+      orderId: 'ORD-1',
+      amount: 100,
+      midtransOrderId: 'ORD-1-TX1',
+    });
+    expect(prisma.paymentTransaction.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        orderId: 'ORD-1',
+        currency: 'IDR',
+        provider: PaymentProvider.MIDTRANS,
+        channel: PaymentChannel.SNAP_ALL,
+        status: 'PENDING',
       }),
+    });
+
+    // findByOrderId
+    await repository.findByOrderId('ORD-1');
+    expect(prisma.paymentTransaction.findMany).toHaveBeenCalledWith({
+      where: { orderId: 'ORD-1' },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // findLatestByOrderId found
+    prisma.paymentTransaction.findFirst.mockResolvedValueOnce({ id: 'tx-1' });
+    const found = await repository.findLatestByOrderId('ORD-1');
+    expect(found.id).toBe('tx-1');
+
+    // findLatestByOrderId not found
+    prisma.paymentTransaction.findFirst.mockResolvedValueOnce(null);
+    await expect(
+      repository.findLatestByOrderId('ORD-MISSING'),
+    ).rejects.toThrow();
+
+    // findByMidtransOrderId
+    await repository.findByMidtransOrderId('ORD-1-TX1');
+    expect(prisma.paymentTransaction.findUnique).toHaveBeenCalledWith({
+      where: { midtransOrderId: 'ORD-1-TX1' },
+    });
+    prisma.paymentTransaction.findFirst.mockResolvedValueOnce({
+      id: 'tx-paid',
+      orderId: 'ORD-1',
+      status: 'SETTLEMENT',
+    });
+    const successful = await repository.findSuccessfulByOrderId('ORD-1');
+    expect(successful?.status).toBe('SETTLEMENT');
+
+    prisma.paymentTransaction.findFirst.mockResolvedValueOnce({
+      id: 'tx-paid',
+      orderId: 'ORD-1',
+      status: 'SETTLEMENT',
+    });
+    const current = await repository.findCurrentByOrderId('ORD-1');
+    expect(current.status).toBe('SETTLEMENT');
+    // findUnsettledTransactions and findPendingTransactions
+    prisma.paymentTransaction.findMany.mockResolvedValueOnce([
+      { id: 'tx-unsettled' },
+    ]);
+    const unsettledAll = await repository.findUnsettledTransactions();
+    expect(unsettledAll).toHaveLength(1);
+
+    prisma.paymentTransaction.findMany.mockResolvedValueOnce([
+      { id: 'tx-pending' },
+    ]);
+    const pending = await repository.findPendingTransactions(10);
+    expect(pending).toHaveLength(1);
+    // findTransactionsForSync by orderId (unsettled)
+    prisma.paymentTransaction.findMany.mockResolvedValueOnce([
+      { id: 'tx-u', orderId: 'ORD-1', status: 'PENDING' },
+    ]);
+    const syncByOrderUnsettled =
+      await repository.findTransactionsForSync('ORD-1');
+    expect(syncByOrderUnsettled).toHaveLength(1);
+
+    // findTransactionsForSync by orderId (only settled)
+    prisma.paymentTransaction.findMany.mockResolvedValueOnce([
+      { id: 'tx-s', orderId: 'ORD-1', status: 'SETTLEMENT' },
+    ]);
+    const syncByOrderSettled =
+      await repository.findTransactionsForSync('ORD-1');
+    expect(syncByOrderSettled).toHaveLength(1);
+
+    // findTransactionsForSync not found
+    prisma.paymentTransaction.findMany.mockResolvedValueOnce([]);
+    await expect(repository.findTransactionsForSync('NONE')).rejects.toThrow(
+      NotFoundException,
+    );
+    // findTransactionsForBatchSync empty ids
+    prisma.paymentTransaction.findMany.mockResolvedValueOnce([
+      { id: 'tx-all', status: 'PENDING' },
+    ]);
+    const batchEmpty = await repository.findTransactionsForBatchSync();
+    expect(batchEmpty).toHaveLength(1);
+
+    // findTransactionsForBatchSync with ids
+    prisma.paymentTransaction.findMany.mockResolvedValueOnce([
+      { id: 'tx-1', orderId: 'ORD-1', status: 'PENDING' },
+      { id: 'tx-2', orderId: 'ORD-2', status: 'SETTLEMENT' },
+    ]);
+    const batchWithIds = await repository.findTransactionsForBatchSync([
+      'ORD-1',
+      'ORD-2',
+    ]);
+    expect(batchWithIds).toHaveLength(2);
+
+    prisma.paymentTransaction.findFirst.mockResolvedValueOnce({
+      id: 'tx-active',
+      orderId: 'ORD-1',
+      status: 'PENDING',
+    });
+    const active = await repository.findPendingByOrderId('ORD-1');
+    expect(active?.status).toBe('PENDING');
+
+    const locked = await repository.withOrderLock('ORD-1', () =>
+      Promise.resolve('locked'),
+    );
+    expect(locked).toBe('locked');
+    const orders = await repository.listOrders({
+      status: 'PENDING',
+      startDate: new Date('2026-10-01T00:00:00.000Z'),
+      endDate: new Date('2026-11-01T00:00:00.000Z'),
+      page: 1,
+      pageSize: 10,
+    });
+    expect(orders).toHaveLength(1);
+    expect(prisma.$queryRaw).toHaveBeenCalled();
+
+    // updateTransactionStatus without tx
+    await repository.updateTransactionStatus('tx-1', 'SETTLEMENT', {
+      midtransTransactionId: 'mt-1',
+      signatureKey: 'sig',
+      paidAt: new Date(0),
+    });
+    expect(prisma.paymentTransaction.update).toHaveBeenCalled();
+
+    // updateTransactionStatus with tx
+    const mockTx = {
+      paymentTransaction: {
+        update: jest.fn().mockResolvedValue({ id: 'tx-1' }),
+      },
     } as any;
-    const service = new InvoicesService(repository, midtrans);
-    await service.createInvoice({
-      organizationId: 'org',
-      amount: 10,
-      dueDate: new Date().toISOString(),
-      metadata: { source: 'test' },
+    await repository.updateTransactionStatus(
+      'tx-1',
+      'CANCEL',
+      undefined,
+      mockTx,
+    );
+    expect(mockTx.paymentTransaction.update).toHaveBeenCalled();
+  });
+  it('covers PaymentsController and WebhooksController routes', async () => {
+    const mockPaymentsService = {
+      createSnapPayment: jest.fn().mockResolvedValue({ orderId: 'ORD-1' }),
+      createQrPayment: jest.fn().mockResolvedValue({ orderId: 'ORD-1' }),
+      createVirtualAccountPayment: jest
+        .fn()
+        .mockResolvedValue({ orderId: 'ORD-1' }),
+      listPaymentOrders: jest.fn().mockResolvedValue({ orders: [] }),
+      getPaymentStatus: jest.fn().mockResolvedValue({ orderId: 'ORD-1' }),
+      getPaymentTransactions: jest.fn().mockResolvedValue([]),
+      syncBatch: jest.fn().mockResolvedValue({ total: 1 }),
+      syncPaymentStatus: jest.fn().mockResolvedValue({ status: 'SETTLEMENT' }),
+    } as any;
+
+    const controller = new PaymentsController(mockPaymentsService);
+    await controller.createSnapPayment({ orderId: 'ORD-1', amount: 100 });
+    await controller.createQrPayment({ orderId: 'ORD-1', amount: 100 });
+    await controller.createVirtualAccountPayment({
+      orderId: 'ORD-1',
+      amount: 100,
+      bank: 'bca',
     });
-    const invoice = {
-      id: 'i',
-      invoiceNumber: 'INV-1',
-      amount: 10,
-      description: null,
-      status: InvoiceStatus.UNPAID,
-      billingAccount: { name: 'Name', email: 'e', phone: null },
-    };
-    repository.findById.mockResolvedValue(invoice);
-    await service.getInvoiceById('i');
-    await service.checkoutInvoice('i', { channel: PaymentChannel.QRIS });
-    await service.generateQr('i');
-    repository.findById.mockResolvedValue({
-      ...invoice,
-      status: InvoiceStatus.PAID,
+    await controller.listPaymentOrders({
+      startDate: '2026-10-01T00:00:00.000Z',
+      endDate: '2026-11-01T00:00:00.000Z',
+      page: 1,
+      pageSize: 50,
     });
-    await expect(service.checkoutInvoice('i', {} as any)).rejects.toThrow();
-    await expect(service.generateQr('i')).rejects.toThrow();
-    repository.findById.mockResolvedValue({
-      ...invoice,
-      status: InvoiceStatus.VOID,
+    await controller.getPaymentStatus('ORD-1');
+    await controller.getPaymentTransactions('ORD-1');
+    await controller.syncBatch({ orderIds: ['ORD-1'] });
+    await controller.syncPaymentStatus('ORD-1');
+
+    expect(mockPaymentsService.createSnapPayment).toHaveBeenCalled();
+    expect(mockPaymentsService.createQrPayment).toHaveBeenCalled();
+    expect(mockPaymentsService.createVirtualAccountPayment).toHaveBeenCalled();
+    expect(mockPaymentsService.listPaymentOrders).toHaveBeenCalled();
+    expect(mockPaymentsService.getPaymentStatus).toHaveBeenCalled();
+    expect(mockPaymentsService.getPaymentTransactions).toHaveBeenCalled();
+    expect(mockPaymentsService.syncBatch).toHaveBeenCalled();
+    expect(mockPaymentsService.syncPaymentStatus).toHaveBeenCalled();
+
+    const mockWebhooksService = {
+      handleMidtransWebhook: jest.fn().mockResolvedValue({ status: 'OK' }),
+    } as any;
+    const webhooksController = new WebhooksController(mockWebhooksService);
+    await webhooksController.handleMidtransWebhook({} as any);
+    expect(mockWebhooksService.handleMidtransWebhook).toHaveBeenCalled();
+  });
+
+  it('covers PaymentMethodsService and PaymentMethodsController', async () => {
+    const prisma = {
+      virtualAccountBank: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([{ code: 'bca', name: 'BCA Virtual Account' }]),
+        findFirst: jest.fn().mockResolvedValue({
+          code: 'bca',
+          name: 'BCA Virtual Account',
+          enabled: true,
+        }),
+      },
+    } as any;
+
+    const service = new PaymentMethodsService(prisma);
+    const banks = await service.listEnabledVirtualAccountBanks();
+    expect(banks).toHaveLength(1);
+    const bank = await service.findEnabledBank('bca');
+    expect(bank?.code).toBe('bca');
+
+    const controller = new PaymentMethodsController(service);
+    const list = await controller.listVirtualAccountBanks();
+    expect(list).toHaveLength(1);
+  });
+
+  it('covers SignaturesService and SignaturesController', () => {
+    const signaturesService = new SignaturesService({
+      get: jest.fn().mockReturnValue('test-api-key'),
+    } as any);
+    const signaturesController = new SignaturesController(signaturesService);
+    const generated = signaturesController.generateSignature({
+      method: 'GET',
+      path: '/api/v1/payments',
     });
-    await expect(service.checkoutInvoice('i', {} as any)).rejects.toThrow();
-    repository.findById.mockResolvedValue({
-      ...invoice,
-      status: InvoiceStatus.EXPIRED,
-    });
-    await expect(service.checkoutInvoice('i', {} as any)).rejects.toThrow();
+    expect(generated.signature).toBeDefined();
   });
 
   it('covers Midtrans mock, HTTP success/error, and signatures', async () => {
-    const mockConfig = { get: jest.fn().mockReturnValue('') } as any;
-    const mock = new MidtransService(mockConfig);
-    await mock.createSnapTransaction({ orderId: 'o', grossAmount: 1 });
-    expect(
-      mock.verifySignatureKey({
-        orderId: 'o',
-        statusCode: '200',
-        grossAmount: '1',
-        signatureKey: 'x',
+    const mockConfig = {
+      get: jest.fn((key: string) => {
+        if (key === 'MIDTRANS_SERVER_KEY') return 'test-key';
+        if (key === 'MIDTRANS_IS_PRODUCTION') return false;
+        return undefined;
       }),
-    ).toBe(true);
-
-    const config = {
-      get: jest.fn((key: string, fallback: unknown) =>
-        key === 'MIDTRANS_SERVER_KEY' ? 'secret' : fallback,
-      ),
     } as any;
-    const service = new MidtransService(config);
-    const post = jest.spyOn(axios, 'post').mockResolvedValueOnce({
-      data: { token: 't', redirect_url: 'u' },
+
+    const midtrans = new MidtransService(mockConfig);
+    const post = jest.spyOn(axios, 'post');
+
+    post.mockResolvedValueOnce({
+      data: {
+        token: 'snap-token',
+        redirect_url: 'https://redirect',
+      },
     });
-    await service.createSnapTransaction({ orderId: 'o', grossAmount: 1 });
-    post.mockRejectedValueOnce(new Error('network'));
+
+    const snap = await midtrans.createSnapTransaction({
+      orderId: 'ORD-SNAP',
+      grossAmount: 100000,
+    });
+    expect(snap.token).toBe('snap-token');
+
+    post.mockResolvedValueOnce({
+      data: {
+        order_id: 'ORD-VA',
+        transaction_status: 'pending',
+        va_numbers: [{ bank: 'bca', va_number: '1234567890' }],
+        expiry_time: '2026-10-25 10:00:00',
+      },
+    });
+
+    const va = await midtrans.createVirtualAccount({
+      orderId: 'ORD-VA',
+      grossAmount: 100000,
+      bank: 'bca',
+    });
+    expect(va.vaNumber).toBe('1234567890');
+
+    post.mockResolvedValueOnce({
+      data: {
+        order_id: 'ORD-QR-OK',
+        transaction_status: 'pending',
+        qr_string: '0002010102120000',
+        actions: [
+          { name: 'generate-qr-code', url: 'https://api.midtrans.com/qr' },
+        ],
+        expiry_time: '2026-10-25 10:00:00',
+      },
+    });
+    const qrOk = await midtrans.createQrTransaction({
+      orderId: 'ORD-QR-OK',
+      grossAmount: 100000,
+      customerDetails: { first_name: 'Alice', email: 'alice@example.com' },
+      itemDetails: [
+        { id: 'item-1', name: 'Item 1', price: 100000, quantity: 1 },
+      ],
+    });
+    expect(qrOk.qrImageUrl).toBe('https://api.midtrans.com/qr');
+    expect(qrOk.qrString).toBe('0002010102120000');
+
+    // Error branch
+    post.mockRejectedValueOnce(new Error('network error'));
     await expect(
-      service.createSnapTransaction({ orderId: 'o', grossAmount: 1 }),
+      midtrans.createSnapTransaction({
+        orderId: 'ORD-FAIL',
+        grossAmount: 100,
+      }),
     ).rejects.toThrow('Midtrans Snap error');
+
+    // VA Error branch
+    post.mockRejectedValueOnce(new Error('va error'));
+    await expect(
+      midtrans.createVirtualAccount({
+        orderId: 'ORD-VA-FAIL',
+        grossAmount: 100,
+        bank: 'bca',
+      }),
+    ).rejects.toThrow('Midtrans virtual account error');
+
+    // QR Error branch
+    post.mockRejectedValueOnce(new Error('qr error'));
+    await expect(
+      midtrans.createQrTransaction({
+        orderId: 'ORD-QR-FAIL',
+        grossAmount: 100,
+      }),
+    ).rejects.toThrow('Midtrans QRIS error');
+
     post.mockRestore();
+    // getTransactionStatus branches
+    const get = jest.spyOn(axios, 'get');
+    get.mockResolvedValueOnce({
+      data: {
+        status_code: '200',
+        transaction_status: 'settlement',
+        order_id: 'ORD-STATUS',
+        gross_amount: '100000.00',
+      },
+    });
+    const statusResult = await midtrans.getTransactionStatus('ORD-STATUS');
+    expect(statusResult?.transactionStatus).toBe('settlement');
+
+    // 404 branch
+    get.mockRejectedValueOnce({ response: { status: 404 } });
+    const notFoundResult = await midtrans.getTransactionStatus('ORD-NOTFOUND');
+    expect(notFoundResult).toBeNull();
+
+    // 500 error branch
+    get.mockRejectedValueOnce(new Error('midtrans server down'));
+    await expect(midtrans.getTransactionStatus('ORD-ERR')).rejects.toThrow(
+      'Midtrans status error',
+    );
+    get.mockRestore();
+
+    // Signature verification
     expect(
-      service.verifySignatureKey({
-        orderId: 'o',
+      midtrans.verifySignatureKey({
+        orderId: 'ORD-1',
         statusCode: '200',
-        grossAmount: '1',
-        signatureKey: 'bad',
+        grossAmount: '100000',
+        signatureKey: 'bad-signature',
       }),
     ).toBe(false);
+
+    // Empty server key in dev bypasses signature
+    const emptyConfig = {
+      get: jest.fn(() => ''),
+    } as any;
+    const devMidtrans = new MidtransService(emptyConfig);
+    const mockStatus = await devMidtrans.getTransactionStatus('ORD-DEV');
+    expect(mockStatus?.transactionStatus).toBe('settlement');
+    expect(
+      devMidtrans.verifySignatureKey({
+        orderId: 'ORD-1',
+        statusCode: '200',
+        grossAmount: '100000',
+        signatureKey: 'any',
+      }),
+    ).toBe(true);
   });
 
   it('covers outbox lifecycle, relay branches, and Prisma lifecycle', async () => {
-    const updates = jest.fn().mockResolvedValue({});
     const prisma = {
       outboxEvent: {
         create: jest.fn().mockResolvedValue({ id: 'e' }),
         findMany: jest.fn(),
-        update: updates,
+        update: jest.fn().mockResolvedValue({ id: 'e' }),
       },
     } as any;
     const config = { get: jest.fn().mockReturnValue('kafka:29092') } as any;
-    const service = new OutboxService(prisma, config);
-    await service.emit('Invoice', 'i', 'INVOICE_PAID', { x: 1 });
-    await service.emit('Invoice', 'i', 'PAYMENT_FAILED', { x: 1 }, {
-      outboxEvent: prisma.outboxEvent,
-    } as any);
+
+    const outbox = new OutboxService(prisma, config);
+    await outbox.emit('PAYMENT', 'ord-1', 'PAYMENT_COMPLETED', { x: 1 });
+    await outbox.emit('PAYMENT', 'ord-1', 'PAYMENT_FAILED', { x: 2 });
+    await outbox.emit('UNKNOWN', 'ord-1', 'UNKNOWN_EVENT', { x: 3 });
+
+    // processPendingEvents without pending
     prisma.outboxEvent.findMany.mockResolvedValueOnce([]);
-    expect(await service.processPendingEvents()).toBe(0);
+    expect(await outbox.processPendingEvents()).toBe(0);
+
+    // processPendingEvents fallback without kafka producer
     prisma.outboxEvent.findMany.mockResolvedValueOnce([
-      { id: 'e', eventType: 'UNKNOWN', aggregateId: 'i', payload: {} },
+      {
+        id: 'e1',
+        eventType: 'PAYMENT_COMPLETED',
+        aggregateId: 'ord-1',
+        payload: { a: 1 },
+      },
+      {
+        id: 'e-unknown',
+        eventType: 'UNKNOWN',
+        aggregateId: 'ord-1',
+        payload: { a: 2 },
+      },
     ]);
-    expect(await service.processPendingEvents()).toBe(1);
+    expect(await outbox.processPendingEvents()).toBe(2);
+
+    // processPendingEvents with kafka producer
     const producer = {
-      send: jest.fn().mockResolvedValue(undefined),
-      disconnect: jest.fn().mockResolvedValue(undefined),
-    };
-    (service as unknown as { producer: typeof producer }).producer = producer;
-    prisma.outboxEvent.findMany.mockResolvedValueOnce([
-      { id: 'e2', eventType: 'INVOICE_PAID', aggregateId: 'i', payload: {} },
-    ]);
-    expect(await service.processPendingEvents()).toBe(1);
-    producer.send.mockRejectedValueOnce(new Error('send failed'));
-    prisma.outboxEvent.findMany.mockResolvedValueOnce([
-      { id: 'e3', eventType: 'PAYMENT_FAILED', aggregateId: 'i', payload: {} },
-    ]);
-    expect(await service.processPendingEvents()).toBe(0);
-    const producerForInit = {
       connect: jest.fn().mockResolvedValue(undefined),
       disconnect: jest.fn().mockResolvedValue(undefined),
       send: jest.fn().mockResolvedValue(undefined),
     };
-    const producerSpy = jest
-      .spyOn(Kafka.prototype, 'producer')
-      .mockReturnValue(producerForInit as never);
+    (outbox as any).producer = producer;
+
+    prisma.outboxEvent.findMany.mockResolvedValueOnce([
+      {
+        id: 'e-success',
+        eventType: 'PAYMENT_COMPLETED',
+        aggregateId: 'ord-1',
+        payload: { a: 1 },
+      },
+    ]);
+    expect(await outbox.processPendingEvents()).toBe(1);
+
+    // Kafka send failed branch
+    prisma.outboxEvent.findMany.mockResolvedValueOnce([
+      {
+        id: 'e-fail',
+        eventType: 'PAYMENT_COMPLETED',
+        aggregateId: 'ord-1',
+        payload: { a: 1 },
+      },
+    ]);
+    producer.send.mockRejectedValueOnce(new Error('kafka send fail'));
+    expect(await outbox.processPendingEvents()).toBe(0);
+
+    // OnModuleInit & Destroy lifecycle
     const originalSetInterval = globalThis.setInterval;
     let relayCallback: (() => void) | undefined;
     globalThis.setInterval = ((callback: () => void) => {
       relayCallback = callback;
       return { unref: jest.fn() } as unknown as NodeJS.Timeout;
     }) as typeof setInterval;
-    const originalNodeEnv = process.env.NODE_ENV;
+
+    const producerSpy = jest
+      .spyOn(Kafka.prototype, 'producer')
+      .mockReturnValue(producer as any);
+
+    const origNodeEnv = process.env.NODE_ENV;
     process.env.NODE_ENV = 'development';
-    await service.onModuleInit();
+    process.env.KAFKA_ENABLED = 'true';
+    await outbox.onModuleInit();
     relayCallback?.();
     await new Promise<void>((resolve) => setImmediate(resolve));
-    await service.onModuleDestroy();
-    process.env.NODE_ENV = originalNodeEnv;
+    await outbox.onModuleDestroy();
+    process.env.NODE_ENV = origNodeEnv;
     globalThis.setInterval = originalSetInterval;
     producerSpy.mockRestore();
 
-    const original = process.env.NODE_ENV;
-    process.env.NODE_ENV = 'test';
-    await service.onModuleInit();
-    await service.onModuleDestroy();
-    process.env.NODE_ENV = original;
-
+    // PrismaService lifecycle
     const prismaService = new PrismaService();
-    (prismaService as any).$connect = jest.fn().mockResolvedValue(undefined);
-    (prismaService as any).$disconnect = jest.fn().mockResolvedValue(undefined);
+    prismaService.$connect = jest.fn().mockResolvedValue(undefined);
+    prismaService.$disconnect = jest.fn().mockResolvedValue(undefined);
     await prismaService.onModuleInit();
     await prismaService.onModuleDestroy();
   });

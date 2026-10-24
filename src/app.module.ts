@@ -3,16 +3,17 @@ import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import { WinstonModule } from 'nest-winston';
+import { RedisModule } from './common/redis/redis.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
-import { JwtAuthModule } from './common/auth/jwt-auth.module.js';
 import { HealthModule } from './modules/health/health.module.js';
 import { MetricsModule } from './modules/metrics/metrics.module.js';
-import { InvoicesModule } from './modules/invoices/invoices.module.js';
+import { PaymentsModule } from './modules/payments/payments.module.js';
 import { MidtransModule } from './modules/midtrans/midtrans.module.js';
 import { WebhooksModule } from './modules/webhooks/webhooks.module.js';
 import { OutboxModule } from './modules/outbox/outbox.module.js';
-import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
-import { RolesGuard } from './common/guards/roles.guard.js';
+import { PaymentMethodsModule } from './modules/payment-methods/payment-methods.module.js';
+import { SignaturesModule } from './modules/signatures/signatures.module.js';
+import { ApiKeyGuard } from './common/guards/api-key.guard.js';
 import { loggerConfig } from './config/logger.config.js';
 import { validate } from './config/env.validation.js';
 
@@ -29,14 +30,16 @@ import { validate } from './config/env.validation.js';
         limit: 100,
       },
     ]),
+    RedisModule,
     PrismaModule,
-    JwtAuthModule,
     HealthModule,
     MetricsModule,
-    InvoicesModule,
+    PaymentsModule,
     MidtransModule,
     WebhooksModule,
     OutboxModule,
+    PaymentMethodsModule,
+    SignaturesModule,
   ],
   providers: [
     {
@@ -45,11 +48,7 @@ import { validate } from './config/env.validation.js';
     },
     {
       provide: APP_GUARD,
-      useClass: JwtAuthGuard,
-    },
-    {
-      provide: APP_GUARD,
-      useClass: RolesGuard,
+      useClass: ApiKeyGuard,
     },
   ],
 })

@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "bun",
+      "request": "launch",
+      "name": "Debug Billing Service (Bun)",
+      "program": "${workspaceFolder}/src/main.ts",
+      "watchMode": true,
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen"
+    },
+    {
+      "type": "bun",
+      "request": "launch",
+      "name": "Debug Billing Service (wait for debugger)",
+      "program": "${workspaceFolder}/src/main.ts",
+      "stopOnEntry": true,
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen"
+    }
+  ]
+}

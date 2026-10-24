@@ -7,7 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { Kafka, type Producer } from 'kafkajs';
-import type { Prisma } from '@prisma/client';
+import { OutboxStatus, type Prisma } from '@prisma/client';
 
 @Injectable()
 export class OutboxService implements OnModuleInit, OnModuleDestroy {
@@ -22,7 +22,11 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit() {
-    if (process.env.NODE_ENV === 'test') {
+    const kafkaEnabled =
+      process.env.KAFKA_ENABLED?.toLowerCase() ??
+      (process.env.NODE_ENV === 'production' ? 'true' : 'false');
+    if (process.env.NODE_ENV === 'test' || kafkaEnabled !== 'true') {
+      this.logger.log('Kafka relay disabled by KAFKA_ENABLED');
       return;
     }
 
@@ -60,9 +64,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
-    if (this.relayTimer) {
-      clearInterval(this.relayTimer);
-    }
+    clearInterval(this.relayTimer);
     if (this.producer) {
       await this.producer.disconnect().catch(() => {});
     }
@@ -86,16 +88,16 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
         aggregateId,
         eventType,
         payload: payload as Prisma.InputJsonValue,
-        status: 'PENDING',
+        status: OutboxStatus.PENDING,
       },
     });
   }
 
   private topicFor(eventType: string): string | null {
     switch (eventType) {
-      case 'INVOICE_PAID':
-        return 'billing.invoice.paid';
-      case 'INVOICE_EXPIRED':
+      case 'PAYMENT_COMPLETED':
+      case 'PAYMENT_PAID':
+        return 'billing.payment.completed';
       case 'PAYMENT_FAILED':
         return 'billing.payment.failed';
       default:
@@ -105,7 +107,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
 
   async processPendingEvents(): Promise<number> {
     const pendingEvents = await this.prisma.outboxEvent.findMany({
-      where: { status: 'PENDING' },
+      where: { status: OutboxStatus.PENDING },
       take: 50,
       orderBy: { createdAt: 'asc' },
     });
@@ -148,7 +150,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
         await this.prisma.outboxEvent.update({
           where: { id: event.id },
           data: {
-            status: 'PROCESSED',
+            status: OutboxStatus.PROCESSED,
             processedAt: new Date(),
           },
         });
@@ -160,7 +162,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
         );
         await this.prisma.outboxEvent.update({
           where: { id: event.id },
-          data: { status: 'FAILED' },
+          data: { status: OutboxStatus.FAILED },
         });
       }
     }

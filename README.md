@@ -1,15 +1,18 @@
-# Billing Service
+# Billing & Payment Service
 
-Centralized billing integration API for invoice management, Midtrans payments, payment webhooks, and event delivery. The service is built with NestJS, TypeScript, Prisma, PostgreSQL, and Bun.
+Centralized payment gateway integration API for Midtrans payments, payment webhooks, and transactional event delivery. The service is built with NestJS, TypeScript, Prisma, PostgreSQL, and Bun.
+
+Detailed endpoint purposes, request flows, webhook processing, and payment lifecycles: [`docs/billing-flow.md`](docs/billing-flow.md).
 
 ## Capabilities
 
-- Invoice creation and retrieval
-- Midtrans checkout and QRIS payment initiation
+- Midtrans Snap checkout, direct QRIS, and Virtual Account payment initiation
+- Multi-attempt payment transaction history per external order
 - Public Midtrans webhook handling with SHA-512 signature validation
 - Idempotent payment settlement processing
-- Transactional outbox events with Kafka publication and fallback relay
-- JWT-protected invoice and payment endpoints
+- Transactional outbox events with Kafka publication (`billing.payment.completed`, `billing.payment.failed`) and fallback relay
+- Service-to-service authentication via `X-Api-Key` or Bearer header
+- Configurable Virtual Account bank catalog
 - Health checks, structured request logging, Prometheus metrics, and Swagger/OpenAPI documentation
 
 ## Runtime and package manager
@@ -24,26 +27,31 @@ Do not use npm, Yarn, pnpm, `node`, or Node-based test runners. The committed lo
 
 ## Quick start
 
-1. Copy `.env.example` to `.env` and provide the required values.
-2. Start PostgreSQL and the application dependencies, or use the local Compose stack:
+1. Copy `.env.example` to `.env` and provide the required values:
+
+```bash
+cp .env.example .env
+```
+
+2. Start PostgreSQL and application dependencies:
 
 ```bash
 docker compose up -d
 ```
 
-3. Apply the database schema:
+3. Apply database migrations:
 
 ```bash
 bunx prisma migrate dev
 ```
 
-4. Start the development server:
+4. Start development server:
 
 ```bash
 bun run start:dev
 ```
 
-The default local application port is `3000` when running directly. The development Compose stack exposes the container on port `5000` by default.
+Default application port is `3000` (or `5000` via Docker Compose).
 
 ## Development commands
 
@@ -55,11 +63,12 @@ The default local application port is `3000` when running directly. The developm
 | `bun run start:debug` | Start in debug/watch mode |
 | `bun run build` | Build to `dist/` |
 | `bun run start:prod` | Run the built application with Bun |
-| `bun run lint` | Run ESLint with repository formatting rules |
-| `bun run format` | Format TypeScript source and tests |
-| `bunx prisma generate` | Generate the Prisma client |
+| `bun run lint` | Run ESLint check/fix |
+| `bun run test` | Run test suite |
+| `bun run test:cov` | Run tests with coverage and enforcement gate |
+| `bunx prisma generate` | Generate Prisma client |
 | `bunx prisma migrate dev` | Create/apply development migrations |
-| `bunx prisma migrate deploy` | Apply committed migrations in deployment environments |
+| `bunx prisma migrate deploy` | Apply migrations in deployment environments |
 | `bun run docs:openapi` | Generate `contracts/openapi.json` |
 
 ## API
@@ -71,140 +80,103 @@ The application sets the global `/api` prefix. Swagger UI is available at `/docs
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/health` | Check database health |
-| `POST` | `/api/v1/webhooks/midtrans` | Receive Midtrans payment notifications |
+| `POST` | `/api/v1/webhooks/midtrans` | Receive Midtrans payment notifications (SHA-512 validated) |
 
-### Authenticated endpoints
+### Service-to-service endpoints
 
-These endpoints require a Bearer JWT.
+Protected by `ApiKeyGuard` (`X-Api-Key: <key>`, `X-Signature: <hmac-sha256>`, and `X-Timestamp: <timestamp>`). Request signature is computed as `HMAC-SHA256(METHOD:PATH:TIMESTAMP:BODY_HASH, API_KEY)` with a 5-minute replay window. For full guide, code examples (Node.js, cURL, Python), and header format, see [API Signature Authentication Documentation](docs/api-signature-authentication.md). Payment initiation endpoints are automatically idempotent via Redis, deduplicating concurrent or duplicate requests by `orderId` and payload SHA-256 hash.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/v1/invoices` | Create an invoice |
-| `GET` | `/api/v1/invoices/:id` | Retrieve invoice details and transactions |
-| `POST` | `/api/v1/invoices/:id/checkout` | Create a Midtrans Snap checkout transaction |
-| `POST` | `/api/v1/invoices/:id/qr` | Generate a QRIS payment response |
+| `POST` | `/api/v1/payments/snap` | Initiate Midtrans Snap payment checkout |
+| `POST` | `/api/v1/payments/qr` | Generate QRIS payment code |
+| `POST` | `/api/v1/payments/virtual-account` | Create Midtrans bank Virtual Account |
+| `GET` | `/api/v1/payments` | List latest payment transaction per external order; requires `startDate` and exclusive `endDate`, supports `status`, `page`, and `pageSize`, returns `data`, `page`, `pageSize`, and `total` |
+| `GET` | `/api/v1/payments/:orderId` | Get latest payment status for an order |
+| `GET` | `/api/v1/payments/:orderId/transactions` | Get payment attempt transactions for an order |
+| `POST` | `/api/v1/payments/:orderId/sync` | Query Midtrans and reconcile one order's latest transaction |
+| `POST` | `/api/v1/payments/sync` | Query Midtrans for explicit `orderIds` or all unsettled transactions if payload is omitted |
+| `GET` | `/api/v1/payment-methods/virtual-account` | List enabled Virtual Account banks |
+| `POST` | `/api/v1/signatures/generate` | Generate HMAC-SHA256 request signature and headers for service-to-service calls |
 
 ### Operational endpoints
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/metrics` | Expose raw Prometheus metrics |
-| `GET` | `/docs` | Open Swagger UI |
-
-`/metrics` intentionally stays outside the `/api` prefix and response envelope so Prometheus can scrape the raw exposition format.
+| `GET` | `/metrics` | Prometheus metrics (raw exposition format) |
+| `GET` | `/docs` | Swagger UI |
 
 ## Configuration
-
-Create `.env` from `.env.example`. `DATABASE_URL` and the JWT configuration are required for normal operation. Payment and integration settings control Midtrans, Kafka, CORS, and frontend integration.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
 | `NODE_ENV` | No | `development`, `test`, or `production` |
-| `PORT` | No | HTTP port; defaults to `3000` |
-| `JWT_ACCESS_SECRET` | Yes | Access-token signing secret |
-| `JWT_REFRESH_SECRET` | Yes | Refresh-token signing secret |
-| `JWT_ACCESS_EXPIRATION` | No | Access-token lifetime; defaults to `15m` |
-| `JWT_REFRESH_EXPIRATION` | No | Refresh-token lifetime; defaults to `7d` |
+| `PORT` | No | HTTP port; defaults to `3504` |
+| `API_KEY` | No | Service-to-service authentication secret |
 | `MIDTRANS_SERVER_KEY` | Yes for real payments | Midtrans server credential |
 | `MIDTRANS_CLIENT_KEY` | Yes for real payments | Midtrans client credential |
 | `MIDTRANS_IS_PRODUCTION` | No | Select Midtrans production or sandbox URLs |
-| `KAFKA_BROKERS` | No | Comma-separated Kafka brokers |
-| `KAFKA_CLIENT_ID` | No | Kafka client identifier |
+| `KAFKA_ENABLED` | No | Defaults to `true` in production, `false` otherwise |
+| `KAFKA_BROKERS` | No | Comma-separated Kafka brokers; defaults to `kafka:29092` |
+| `KAFKA_CLIENT_ID` | No | Kafka client identifier; defaults to `billing-service` |
 | `CORS_ORIGINS` | No | Comma-separated allowed origins |
-| `FRONTEND_URL` | No | Frontend/OAuth redirect base URL |
+| `REDIS_ENABLED` | No | Enable Redis idempotency; defaults to `true` (non-test) |
+| `REDIS_URL` | No | Redis connection URL; defaults to `redis://localhost:6379` |
+| `REDIS_IDEMPOTENCY_TTL_SECONDS` | No | Idempotency response cache TTL in seconds; defaults to `60` (1 minute) |
+## Database design
 
-Do not commit `.env` or production credentials. Compose defaults such as `postgres/postgres` and `admin/admin` are for local development only.
+```mermaid
+erDiagram
+    payment_transactions {
+        string id PK
+        string order_id
+        decimal gross_amount
+        string currency
+        string provider
+        string channel
+        string status
+        string midtrans_order_id UK
+        string midtrans_transaction_id
+        string snap_token
+        string snap_redirect_url
+        string va_bank
+        string va_number
+        datetime va_expiry_time
+        jsonb metadata
+        datetime paid_at
+        datetime created_at
+        datetime updated_at
+    }
 
-## Architecture
+    webhook_events {
+        string id PK
+        string provider
+        string event_id UK
+        string order_id
+        string signature_key
+        jsonb payload
+        datetime processed_at
+    }
 
-The code is organized as a NestJS modular monolith:
+    outbox_events {
+        string id PK
+        string aggregate_type
+        string aggregate_id
+        string event_type
+        jsonb payload
+        string status
+        datetime created_at
+        datetime processed_at
+    }
 
-```text
-src/
-  main.ts                 HTTP bootstrap, global prefix, Swagger, metrics
-  app.module.ts           Application module composition
-  config/                 Environment validation and logging
-  common/                 Guards, decorators, filters, interceptors, middleware
-  prisma/                 Global Prisma service/module
-  modules/
-    invoices/             Invoice controller, service, repository, DTOs
-    midtrans/             Midtrans integration
-    webhooks/             Webhook validation and settlement handling
-    outbox/               Durable event storage and relay
-    health/                Database health endpoint
-    metrics/              Prometheus metrics
+    virtual_account_banks {
+        string id PK
+        string code UK
+        string name
+        boolean enabled
+        int sort_order
+        datetime created_at
+        datetime updated_at
+    }
 ```
-
-Feature modules follow the pattern:
-
-```text
-Controller → Service → Repository → Prisma
-```
-
-Controllers own HTTP concerns and DTO binding. Services coordinate business workflows and integrations. Repositories are the Prisma query boundary. Expected client errors use Nest HTTP exceptions. Responses are transformed globally, and exceptions are normalized globally.
-
-The billing data model is defined in `prisma/schema.prisma` and includes `BillingAccount`, `Invoice`, `PaymentTransaction`, `WebhookEvent`, and `OutboxEvent`.
-
-## Local infrastructure
-
-`docker-compose.yml` starts:
-
-- Application container
-- PostgreSQL 15
-- Redis 7
-- Prometheus
-- Grafana
-
-Useful commands:
-
-```bash
-docker compose up -d
-docker compose logs -f app
-docker compose down
-```
-
-The optional `docker-compose.override.yml` changes host ports for local setups. Prometheus scrapes `/metrics`; Grafana loads the provisioned dashboard and Prometheus datasource.
-
-## Testing and quality gates
-
-Tests use Bun's built-in test runner. The repository enforces 100% line coverage for instrumented source files.
-
-```bash
-bun test
-bun run test:watch
-bun run test:cov
-bun run test:e2e
-```
-
-`bun run test:e2e` boots the complete Nest application and requires a reachable PostgreSQL database. Unit tests mock Prisma and external payment/event dependencies.
-
-Before opening a pull request, run:
-
-```bash
-bunx tsc --noEmit
-bun run lint
-bun run test:cov
-bun run build
-```
-
-CI runs Bun installation, Prisma client generation, lint, type checking, the coverage-gated test suite, and the production build.
-
-## Generated API contract
-
-Swagger generates the OpenAPI document from Nest decorators. To update the checked-in contract:
-
-```bash
-bun run docs:openapi
-```
-
-The generated file is `contracts/openapi.json`; update it when routes, DTOs, authentication, or response schemas change.
-
-## Repository conventions
-
-- Use Bun commands and keep `bun.lock` synchronized.
-- Use `.js` extensions in TypeScript imports because the project uses NodeNext module resolution.
-- Keep database access in repositories.
-- Add DTO validation and Swagger decorators for new request bodies and query parameters.
-- Preserve webhook idempotency and transactional outbox behavior.
-- Add behavioral tests for payment signatures, invoice state transitions, webhook processing, outbox relay behavior, and metrics.

@@ -1,9 +1,7 @@
 import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import {
-  WebhooksService,
-  type MidtransWebhookPayload,
-} from './webhooks.service.js';
+import { WebhooksService } from './webhooks.service.js';
+import { MidtransWebhookDto } from './dto/midtrans-webhook.dto.js';
 import { Public } from '../../common/decorators/public.decorator.js';
 
 @ApiTags('Webhooks')
@@ -18,7 +16,7 @@ export class WebhooksController {
     summary:
       'Public webhook receiver for Midtrans payment notifications with SHA512 signature check',
   })
-  async handleMidtransWebhook(@Body() payload: MidtransWebhookPayload) {
+  async handleMidtransWebhook(@Body() payload: MidtransWebhookDto) {
     return this.webhooksService.handleMidtransWebhook(payload);
   }
 }

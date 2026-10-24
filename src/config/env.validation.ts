@@ -26,17 +26,11 @@ class EnvironmentVariables {
   @IsString()
   @IsNotEmpty()
   DATABASE_URL!: string;
-
-  // UMS Stateless RS256 JWT Verification
+  // Service-to-Service API Key Authentication
   @IsString()
   @IsOptional()
-  UMS_JWT_PUBLIC_KEY?: string;
+  API_KEY?: string;
 
-  @IsString()
-  @IsOptional()
-  UMS_JWT_PUBLIC_KEY_PATH?: string;
-
-  // Midtrans Payment Gateway
   @IsString()
   @IsOptional()
   MIDTRANS_SERVER_KEY?: string;
@@ -50,6 +44,10 @@ class EnvironmentVariables {
   MIDTRANS_IS_PRODUCTION: boolean = false;
 
   // Kafka Event Broker
+  @IsBoolean()
+  @IsOptional()
+  KAFKA_ENABLED: boolean = process.env.NODE_ENV === Environment.Production;
+
   @IsString()
   @IsOptional()
   KAFKA_BROKERS: string = 'kafka:29092';
@@ -61,11 +59,33 @@ class EnvironmentVariables {
   @IsString()
   @IsOptional()
   CORS_ORIGINS?: string;
+
+  @IsBoolean()
+  @IsOptional()
+  REDIS_ENABLED: boolean = process.env.NODE_ENV !== Environment.Test;
+
+  @IsString()
+  @IsOptional()
+  REDIS_URL: string = 'redis://localhost:6379';
+
+  @IsOptional()
+  REDIS_IDEMPOTENCY_TTL_SECONDS: number = 60;
 }
 
 export function validate(config: Record<string, unknown>) {
-  const validated = plainToInstance(EnvironmentVariables, config, {
-    enableImplicitConversion: true,
+  const normalizedConfig = { ...config };
+  for (const key of [
+    'MIDTRANS_IS_PRODUCTION',
+    'KAFKA_ENABLED',
+    'REDIS_ENABLED',
+  ] as const) {
+    const value = normalizedConfig[key];
+    if (value === 'true') normalizedConfig[key] = true;
+    if (value === 'false') normalizedConfig[key] = false;
+  }
+
+  const validated = plainToInstance(EnvironmentVariables, normalizedConfig, {
+    enableImplicitConversion: false,
   });
   const errors = validateSync(validated, { skipMissingProperties: false });
 

@@ -47,10 +47,12 @@ async function bootstrap() {
   app.useGlobalInterceptors(new ResponseTransformInterceptor());
 
   const swaggerConfig = new DocumentBuilder()
-    .setTitle('API')
-    .setDescription('API documentation')
+    .setTitle('Payment Integration API')
+    .setDescription(
+      'Payment Gateway Integration & Midtrans Adapter API documentation',
+    )
     .setVersion('1.0')
-    .addBearerAuth()
+    .addApiKey({ type: 'apiKey', name: 'X-Api-Key', in: 'header' }, 'api-key')
     .build();
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('docs', app, document);
@@ -65,6 +67,13 @@ async function bootstrap() {
   }
 
   await app.listen(process.env.PORT ?? 3000);
+  // const appUrl = await app.getUrl();
+  winstonLogger.info(
+    `Application URL: http://localhost:${process.env.PORT ?? 3000}/api`,
+  );
+  winstonLogger.info(
+    `Swagger URL: http://localhost:${process.env.PORT ?? 3000}/docs`,
+  );
 }
 bootstrap().catch((err) => {
   console.error('Failed to bootstrap application:', err);
