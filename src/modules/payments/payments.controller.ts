@@ -22,7 +22,7 @@ import { CreateVaPaymentDto } from './dto/create-va-payment.dto.js';
 import { SyncPaymentsDto } from './dto/sync-payments.dto.js';
 import { ListPaymentOrdersDto } from './dto/list-payment-orders.dto.js';
 import { ListPaymentOrdersResponseDto } from './dto/list-payment-orders-response.dto.js';
-
+import { Idempotent } from '../../common/decorators/idempotent.decorator.js';
 @ApiTags('Payments')
 @ApiSecurity('api-key')
 @Controller('v1/payments')
@@ -31,6 +31,7 @@ export class PaymentsController {
 
   @Post('snap')
   @HttpCode(HttpStatus.OK)
+  @Idempotent({ keyField: 'orderId', scope: 'snap' })
   @ApiOperation({ summary: 'Initiate Midtrans Snap payment checkout' })
   async createSnapPayment(@Body() dto: CreateSnapPaymentDto) {
     return this.paymentsService.createSnapPayment(dto);
@@ -38,6 +39,7 @@ export class PaymentsController {
 
   @Post('qr')
   @HttpCode(HttpStatus.OK)
+  @Idempotent({ keyField: 'orderId', scope: 'qr' })
   @ApiOperation({ summary: 'Generate QRIS payment code for an order' })
   async createQrPayment(@Body() dto: CreateQrPaymentDto) {
     return this.paymentsService.createQrPayment(dto);
@@ -45,6 +47,7 @@ export class PaymentsController {
 
   @Post('virtual-account')
   @HttpCode(HttpStatus.OK)
+  @Idempotent({ keyField: 'orderId', scope: 'va' })
   @ApiOperation({
     summary: 'Create a Midtrans bank virtual account for an order',
   })

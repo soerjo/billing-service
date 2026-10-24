@@ -9,7 +9,6 @@ import { PaymentsRepository } from './payments.repository.js';
 import { MidtransService } from '../midtrans/midtrans.service.js';
 import { PaymentMethodsService } from '../payment-methods/payment-methods.service.js';
 import { OutboxService } from '../outbox/outbox.service.js';
-import { RedisIdempotencyService } from '../../common/redis/redis-idempotency.service.js';
 import { PaymentChannel, Prisma } from '@prisma/client';
 
 describe('PaymentsService', () => {
@@ -46,30 +45,11 @@ describe('PaymentsService', () => {
     emit: jest.fn(),
   };
 
-  const mockRedisIdempotency = {
-    execute: jest.fn(
-      async <T>(
-        _scope: string,
-        _key: string,
-        _req: unknown,
-        operation: () => Promise<T>,
-      ) => operation(),
-    ),
-  };
-
   beforeEach(async () => {
     jest.resetAllMocks();
     mockRepository.withOrderLock.mockImplementation(
       async (_orderId: string, callback: (tx: unknown) => Promise<unknown>) =>
         callback({}),
-    );
-    mockRedisIdempotency.execute.mockImplementation(
-      async <T>(
-        _scope: string,
-        _key: string,
-        _req: unknown,
-        operation: () => Promise<T>,
-      ) => operation(),
     );
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -78,7 +58,6 @@ describe('PaymentsService', () => {
         { provide: MidtransService, useValue: mockMidtransService },
         { provide: PaymentMethodsService, useValue: mockPaymentMethodsService },
         { provide: OutboxService, useValue: mockOutboxService },
-        { provide: RedisIdempotencyService, useValue: mockRedisIdempotency },
       ],
     }).compile();
 

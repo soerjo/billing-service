@@ -923,13 +923,11 @@ describe('coverage gaps', () => {
         rawResponse: {},
       }),
     } as any;
-    const mockIdempotency = { execute: jest.fn((s, k, d, cb) => cb()) } as any;
     const paymentsSvc = new PaymentsService(
       mockRepo,
       mockMidtrans,
       { findEnabledBank: jest.fn().mockResolvedValue({ code: 'bca' }) } as any,
       { emit: jest.fn() } as any,
-      mockIdempotency,
     );
     await paymentsSvc.syncPaymentStatus('ORD-1');
     await paymentsSvc.createQrPayment({ orderId: 'ORD-1', amount: 100 });

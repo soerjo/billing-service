@@ -84,7 +84,7 @@ The application sets the global `/api` prefix. Swagger UI is available at `/docs
 
 ### Service-to-service endpoints
 
-Protected by `ApiKeyGuard` (`X-Api-Key: <key>`, `X-Signature: <hmac-sha256>`, and `X-Timestamp: <timestamp>`). Request signature is computed as `HMAC-SHA256(METHOD:PATH:TIMESTAMP:BODY_HASH, API_KEY)` with a 5-minute replay window. For full guide, code examples (Node.js, cURL, Python), and header format, see [API Signature Authentication Documentation](docs/api-signature-authentication.md). Payment initiation endpoints are automatically idempotent via Redis, deduplicating concurrent or duplicate requests by `orderId` and payload SHA-256 hash.
+Protected by `ApiKeyGuard` (`X-Api-Key: <key>`, `X-Signature: <hmac-sha256>`, and `X-Timestamp: <timestamp>`). Request signature is computed as `HMAC-SHA256(METHOD:PATH:TIMESTAMP:BODY_HASH, API_KEY)` with a 5-minute replay window. For full guide, code examples (Node.js, cURL, Python), and header format, see [API Signature Authentication Documentation](docs/api-signature-authentication.md). Payment initiation endpoints are automatically idempotent via Redis using the modular `@Idempotent({ keyField: 'orderId' })` decorator, deduplicating concurrent or duplicate requests by entity key and payload SHA-256 hash.
 
 | Method | Path | Purpose |
 | --- | --- | --- |

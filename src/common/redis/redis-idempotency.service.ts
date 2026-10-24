@@ -55,9 +55,10 @@ export class RedisIdempotencyService implements OnModuleDestroy {
     orderId: string,
     payload: unknown,
     operation: () => Promise<T>,
+    customTtlSeconds?: number,
   ): Promise<T> {
     if (!orderId?.trim()) {
-      throw new ConflictException('Order ID is required');
+      throw new ConflictException('Idempotency key is required');
     }
     if (!this.enabled || !this.redis) {
       throw new ServiceUnavailableException(
@@ -98,7 +99,7 @@ export class RedisIdempotencyService implements OnModuleDestroy {
         responseKey,
         JSON.stringify(response),
         'EX',
-        this.ttlSeconds,
+        customTtlSeconds || this.ttlSeconds,
       );
       return response;
     } finally {
