@@ -7,6 +7,7 @@ import {
   PaymentProvider,
   PaymentStatus,
   Prisma,
+  MutationCategory,
   PayoutStatus,
 } from '@prisma/client';
 import { ListPaymentOrdersDto } from './modules/payments/dto/list-payment-orders.dto.js';
@@ -1130,5 +1131,119 @@ describe('coverage gaps', () => {
       create: { organizationId: 'org-1' },
       update: {},
     });
+  });
+
+  it('credits tenant balance on sync settlement when transaction has organizationId', async () => {
+    const credit = jest.fn().mockResolvedValue({});
+    const emit = jest.fn().mockResolvedValue(undefined);
+    // Partial stubs: only the methods exercised by syncPaymentStatus are provided.
+    const paymentsRepo = {
+      findTransactionsForSync: jest.fn().mockResolvedValue([
+        {
+          id: 'tx-org',
+          orderId: 'ORD-ORG',
+          midtransOrderId: 'ORD-ORG-TX1',
+          status: 'PENDING',
+          amount: 250,
+          currency: 'IDR',
+          channel: 'QRIS',
+          metadata: null,
+          paidAt: null,
+          organizationId: 'org-test',
+        },
+      ]),
+      withOrderLock: jest.fn((_orderId, cb) => cb({})),
+      lockStatusForUpdate: jest.fn().mockResolvedValue('PENDING'),
+      updateTransactionStatus: jest.fn().mockResolvedValue({}),
+    };
+    const midtrans = {
+      getTransactionStatus: jest.fn().mockResolvedValue({
+        statusCode: '200',
+        transactionStatus: 'settlement',
+        transactionId: 'mt-1',
+        paymentType: 'qris',
+        rawResponse: {},
+      }),
+    };
+    const paymentsSvc = new PaymentsService(
+      paymentsRepo as unknown as PaymentsRepository,
+      midtrans as unknown as MidtransService,
+      {} as unknown as PaymentMethodsService,
+      { emit } as unknown as OutboxService,
+      { credit } as unknown as TenantBalanceService,
+    );
+
+    await paymentsSvc.syncPaymentStatus('ORD-ORG');
+
+    expect(credit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        organizationId: 'org-test',
+        amount: 250,
+        category: MutationCategory.PAYMENT_SETTLEMENT,
+        referenceId: 'ORD-ORG',
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('credits tenant balance on webhook settlement when transaction has organizationId', async () => {
+    const credit = jest.fn().mockResolvedValue({});
+    const txClient = {
+      webhookEvent: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({}),
+      },
+      paymentTransaction: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'tx-org',
+          orderId: 'ORD-ORG',
+          midtransOrderId: 'ORD-ORG-TX1',
+          status: 'PENDING',
+          amount: 250,
+          currency: 'IDR',
+          channel: 'QRIS',
+          metadata: null,
+          paidAt: null,
+          organizationId: 'org-test',
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+    };
+    // Partial stub: $transaction runs the callback against txClient.
+    const prisma = {
+      ...txClient,
+      $transaction: jest.fn((cb) => cb(txClient)),
+    };
+    const webhookSvc = new WebhooksService(
+      prisma as unknown as PrismaService,
+      {
+        verifySignatureKey: jest.fn().mockReturnValue(true),
+      } as unknown as MidtransService,
+      { emit: jest.fn() } as unknown as OutboxService,
+      {
+        lockStatusForUpdate: jest.fn().mockResolvedValue('PENDING'),
+      } as unknown as PaymentsRepository,
+      { credit } as unknown as TenantBalanceService,
+    );
+
+    await webhookSvc.handleMidtransWebhook({
+      order_id: 'ORD-ORG-TX1',
+      status_code: '200',
+      gross_amount: '250',
+      signature_key: 'sig',
+      transaction_id: 'mt-2',
+      transaction_status: 'settlement',
+      settlement_time: '2026-10-31T10:00:00Z',
+    } as unknown as Parameters<WebhooksService['handleMidtransWebhook']>[0]);
+
+    expect(credit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        organizationId: 'org-test',
+        amount: 250,
+        category: MutationCategory.PAYMENT_SETTLEMENT,
+        referenceId: 'ORD-ORG',
+      }),
+      txClient,
+    );
   });
 });
