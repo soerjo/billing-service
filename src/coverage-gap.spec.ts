@@ -1186,6 +1186,63 @@ describe('coverage gaps', () => {
     );
   });
 
+  it('uses fallback event id, payment type, and settledAt when sync status omits them', async () => {
+    const emit = jest.fn().mockResolvedValue(undefined);
+    const paymentsRepo = {
+      findTransactionsForSync: jest.fn().mockResolvedValue([
+        {
+          id: 'tx-fb',
+          orderId: 'ORD-FB',
+          midtransOrderId: 'ORD-FB-TX1',
+          status: 'PENDING',
+          amount: 75,
+          currency: 'IDR',
+          channel: 'QRIS',
+          metadata: null,
+          paidAt: null,
+          organizationId: null,
+        },
+      ]),
+      withOrderLock: jest.fn((_orderId, cb) => cb({})),
+      lockStatusForUpdate: jest.fn().mockResolvedValue('PENDING'),
+      updateTransactionStatus: jest.fn().mockResolvedValue({}),
+    };
+    const midtrans = {
+      getTransactionStatus: jest.fn().mockResolvedValue({
+        statusCode: '200',
+        transactionStatus: 'settlement',
+        transactionId: undefined,
+        paymentType: undefined,
+        settlementTime: undefined,
+        rawResponse: {},
+      }),
+    };
+    const paymentsSvc = new PaymentsService(
+      paymentsRepo as unknown as PaymentsRepository,
+      midtrans as unknown as MidtransService,
+      {} as unknown as PaymentMethodsService,
+      { emit } as unknown as OutboxService,
+      { credit: jest.fn() } as unknown as TenantBalanceService,
+    );
+
+    const before = Date.now();
+    await paymentsSvc.syncPaymentStatus('ORD-FB');
+
+    expect(emit).toHaveBeenCalledWith(
+      'PAYMENT',
+      'ORD-FB',
+      'PAYMENT_COMPLETED',
+      expect.objectContaining({
+        eventId: expect.stringMatching(/^sync-\d+$/),
+        paymentType: 'QRIS',
+        midtransTransactionId: undefined,
+      }),
+      expect.anything(),
+    );
+    const payload = emit.mock.calls[0][3];
+    expect(Date.parse(payload.settledAt)).toBeGreaterThanOrEqual(before);
+  });
+
   it('credits tenant balance on webhook settlement when transaction has organizationId', async () => {
     const credit = jest.fn().mockResolvedValue({});
     const txClient = {
