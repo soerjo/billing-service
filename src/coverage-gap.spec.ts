@@ -2,7 +2,13 @@
 import { Kafka } from 'kafkajs';
 import axios from 'axios';
 import { validate } from 'class-validator';
-import { PaymentChannel, PaymentProvider } from '@prisma/client';
+import {
+  PaymentChannel,
+  PaymentProvider,
+  PaymentStatus,
+  Prisma,
+  PayoutStatus,
+} from '@prisma/client';
 import { ListPaymentOrdersDto } from './modules/payments/dto/list-payment-orders.dto.js';
 import { PaymentsRepository } from './modules/payments/payments.repository.js';
 import { PaymentsService } from './modules/payments/payments.service.js';
@@ -16,6 +22,7 @@ import { SignaturesService } from './modules/signatures/signatures.service.js';
 import { MidtransService } from './modules/midtrans/midtrans.service.js';
 import { OutboxService } from './modules/outbox/outbox.service.js';
 import { TenantBalanceService } from './modules/tenant-balance/tenant-balance.service.js';
+import { PayoutsRepository } from './modules/payouts/payouts.repository.js';
 import { PrismaService } from './prisma/prisma.service.js';
 import { RedisIdempotencyService } from './common/redis/redis-idempotency.service.js';
 import { ApiKeyGuard } from './common/guards/api-key.guard.js';
@@ -983,5 +990,145 @@ describe('coverage gaps', () => {
       transaction_status: 'settlement',
       settlement_time: undefined,
     } as any);
+  });
+
+  it('covers PaymentsRepository.lockStatusForUpdate, PayoutsRepository, and TenantBalanceService.getBalance', async () => {
+    const paymentsRepository = new PaymentsRepository(
+      {} as unknown as PrismaService,
+    );
+    const lockTx = {
+      $queryRaw: jest
+        .fn()
+        .mockResolvedValueOnce([{ status: PaymentStatus.PENDING }])
+        .mockResolvedValueOnce([]),
+    } as unknown as Prisma.TransactionClient;
+    await expect(
+      paymentsRepository.lockStatusForUpdate('tx-1', lockTx),
+    ).resolves.toBe(PaymentStatus.PENDING);
+    await expect(
+      paymentsRepository.lockStatusForUpdate('missing', lockTx),
+    ).rejects.toThrow(NotFoundException);
+
+    const payoutRequest = {
+      create: jest.fn().mockResolvedValue({ id: 'po-1' }),
+      findUnique: jest
+        .fn()
+        .mockResolvedValueOnce({ id: 'po-1' })
+        .mockResolvedValueOnce(null),
+      findMany: jest.fn().mockResolvedValue([{ id: 'po-1' }]),
+      count: jest.fn().mockResolvedValue(1),
+      updateMany: jest
+        .fn()
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 }),
+      findUniqueOrThrow: jest
+        .fn()
+        .mockResolvedValue({ id: 'po-1', status: PayoutStatus.APPROVED }),
+    };
+    const payoutTx = { payoutRequest } as unknown as Prisma.TransactionClient;
+    const payoutTransactionMock = jest.fn((arg: unknown) => {
+      if (typeof arg === 'function') {
+        return arg(payoutTx);
+      }
+      return Promise.all(arg as Promise<unknown>[]);
+    });
+    const payoutPrisma = {
+      payoutRequest,
+      $transaction: payoutTransactionMock,
+    } as unknown as PrismaService;
+    const payoutsRepository = new PayoutsRepository(payoutPrisma);
+
+    await expect(
+      payoutsRepository.create({
+        organizationId: 'org-1',
+        amount: 100,
+      } as Prisma.PayoutRequestUncheckedCreateInput),
+    ).resolves.toEqual({ id: 'po-1' });
+    expect(payoutRequest.create).toHaveBeenCalledWith({
+      data: { organizationId: 'org-1', amount: 100 },
+    });
+
+    await expect(payoutsRepository.findById('po-1')).resolves.toEqual({
+      id: 'po-1',
+    });
+    await expect(payoutsRepository.findById('po-2')).rejects.toThrow(
+      NotFoundException,
+    );
+
+    await payoutsRepository.findManyByOrganization({
+      organizationId: 'org-1',
+      status: PayoutStatus.APPROVED,
+      page: 2,
+      limit: 5,
+    });
+    expect(payoutRequest.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: { organizationId: 'org-1', status: PayoutStatus.APPROVED },
+        skip: 5,
+        take: 5,
+      }),
+    );
+    const listed = await payoutsRepository.findManyByOrganization({
+      organizationId: 'org-1',
+      page: 1,
+      limit: 10,
+    });
+    expect(payoutRequest.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: { organizationId: 'org-1', status: undefined },
+        skip: 0,
+        take: 10,
+      }),
+    );
+    expect(listed).toEqual({
+      items: [{ id: 'po-1' }],
+      total: 1,
+      page: 1,
+      limit: 10,
+    });
+
+    await expect(
+      payoutsRepository.updateStatusIf(
+        'po-1',
+        [PayoutStatus.PENDING],
+        { status: PayoutStatus.APPROVED },
+        payoutTx,
+      ),
+    ).resolves.toEqual({ id: 'po-1', status: PayoutStatus.APPROVED });
+    await expect(
+      payoutsRepository.updateStatusIf(
+        'po-1',
+        [PayoutStatus.PENDING],
+        { status: PayoutStatus.APPROVED },
+        payoutTx,
+      ),
+    ).resolves.toBeNull();
+
+    await expect(
+      payoutsRepository.transaction((tx) => {
+        expect(tx).toBe(payoutTx);
+        return Promise.resolve('committed');
+      }),
+    ).resolves.toBe('committed');
+    expect(payoutTransactionMock).toHaveBeenCalledTimes(3);
+
+    const balanceUpsertMock = jest
+      .fn()
+      .mockResolvedValue({ id: 'bal-1', organizationId: 'org-1' });
+    const balancePrisma = {
+      tenantBalance: {
+        upsert: balanceUpsertMock,
+      },
+    } as unknown as PrismaService;
+    const tenantBalanceService = new TenantBalanceService(balancePrisma);
+    await expect(tenantBalanceService.getBalance('org-1')).resolves.toEqual({
+      id: 'bal-1',
+      organizationId: 'org-1',
+    });
+    expect(balanceUpsertMock).toHaveBeenCalledWith({
+      where: { organizationId: 'org-1' },
+      create: { organizationId: 'org-1' },
+      update: {},
+    });
   });
 });
