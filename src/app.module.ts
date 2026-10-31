@@ -13,6 +13,8 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module.js';
 import { OutboxModule } from './modules/outbox/outbox.module.js';
 import { PaymentMethodsModule } from './modules/payment-methods/payment-methods.module.js';
 import { SignaturesModule } from './modules/signatures/signatures.module.js';
+import { TenantBalanceModule } from './modules/tenant-balance/tenant-balance.module.js';
+import { PayoutsModule } from './modules/payouts/payouts.module.js';
 import { ApiKeyGuard } from './common/guards/api-key.guard.js';
 import { loggerConfig } from './config/logger.config.js';
 import { validate } from './config/env.validation.js';
@@ -40,6 +42,8 @@ import { validate } from './config/env.validation.js';
     OutboxModule,
     PaymentMethodsModule,
     SignaturesModule,
+    TenantBalanceModule,
+    PayoutsModule,
   ],
   providers: [
     {

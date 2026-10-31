@@ -9,6 +9,7 @@ import { PaymentsRepository } from './payments.repository.js';
 import { MidtransService } from '../midtrans/midtrans.service.js';
 import { PaymentMethodsService } from '../payment-methods/payment-methods.service.js';
 import { OutboxService } from '../outbox/outbox.service.js';
+import { TenantBalanceService } from '../tenant-balance/tenant-balance.service.js';
 import { CreateSnapPaymentDto } from './dto/create-snap-payment.dto.js';
 import { CreateQrPaymentDto } from './dto/create-qr-payment.dto.js';
 import { CreateVaPaymentDto } from './dto/create-va-payment.dto.js';
@@ -16,6 +17,7 @@ import { SyncPaymentsDto } from './dto/sync-payments.dto.js';
 import { ListPaymentOrdersDto } from './dto/list-payment-orders.dto.js';
 import {
   PaymentChannel,
+  MutationCategory,
   PaymentStatus,
   PaymentTransaction,
   Prisma,
@@ -34,6 +36,11 @@ export interface SyncPaymentResult {
   message?: string;
 }
 
+const SETTLED_STATUSES: PaymentStatus[] = [
+  PaymentStatus.SETTLEMENT,
+  PaymentStatus.CAPTURE,
+];
+
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
@@ -43,6 +50,7 @@ export class PaymentsService {
     private readonly midtransService: MidtransService,
     private readonly paymentMethodsService: PaymentMethodsService,
     private readonly outboxService: OutboxService,
+    private readonly tenantBalanceService: TenantBalanceService,
   ) {}
 
   async createSnapPayment(dto: CreateSnapPaymentDto) {
@@ -74,6 +82,7 @@ export class PaymentsService {
       const transaction = await this.paymentsRepository.createTransaction(
         {
           orderId: dto.orderId,
+          organizationId: dto.organizationId,
           amount: new Prisma.Decimal(amount),
           currency: dto.currency || 'IDR',
           description: dto.description,
@@ -132,6 +141,7 @@ export class PaymentsService {
       const transaction = await this.paymentsRepository.createTransaction(
         {
           orderId: dto.orderId,
+          organizationId: dto.organizationId,
           amount: new Prisma.Decimal(amount),
           currency: dto.currency || 'IDR',
           description: dto.description,
@@ -192,6 +202,7 @@ export class PaymentsService {
 
       const transaction = await this.paymentsRepository.createTransaction(
         {
+          organizationId: dto.organizationId,
           orderId: dto.orderId,
           amount: new Prisma.Decimal(amount),
           currency: dto.currency || 'IDR',
@@ -345,64 +356,102 @@ export class PaymentsService {
       : undefined;
 
     if (statusChanged) {
-      await this.paymentsRepository.updateTransactionStatus(
-        transaction.id,
-        normalizedStatus,
-        {
-          midtransTransactionId: midtransStatus.transactionId,
-          rawResponse:
-            midtransStatus.rawResponse as unknown as Prisma.InputJsonValue,
-          paidAt: paidAt ?? transaction.paidAt ?? undefined,
+      await this.paymentsRepository.withOrderLock(
+        transaction.orderId,
+        async (tx) => {
+          // Re-read status under row lock: sync and webhook can race on the same row.
+          const currentStatus =
+            await this.paymentsRepository.lockStatusForUpdate(
+              transaction.id,
+              tx,
+            );
+          if (currentStatus === normalizedStatus) {
+            return;
+          }
+          const wasSettled = SETTLED_STATUSES.includes(currentStatus);
+
+          await this.paymentsRepository.updateTransactionStatus(
+            transaction.id,
+            normalizedStatus,
+            {
+              midtransTransactionId: midtransStatus.transactionId,
+              rawResponse:
+                midtransStatus.rawResponse as unknown as Prisma.InputJsonValue,
+              paidAt: paidAt ?? transaction.paidAt ?? undefined,
+            },
+            tx,
+          );
+
+          if (isPaid && !wasSettled) {
+            await this.outboxService.emit(
+              'PAYMENT',
+              transaction.orderId,
+              'PAYMENT_COMPLETED',
+              {
+                eventId: midtransStatus.transactionId || `sync-${Date.now()}`,
+                eventType: 'PAYMENT_COMPLETED',
+                orderId: transaction.orderId,
+                transactionId: transaction.id,
+                midtransOrderId: transaction.midtransOrderId,
+                midtransTransactionId: midtransStatus.transactionId,
+                amount: Number(transaction.amount),
+                currency: transaction.currency,
+                paymentType: midtransStatus.paymentType || transaction.channel,
+                settledAt: (paidAt || new Date()).toISOString(),
+                metadata: transaction.metadata,
+                source: 'STATUS_SYNC',
+              },
+              tx,
+            );
+
+            if (transaction.organizationId) {
+              await this.tenantBalanceService.credit(
+                {
+                  organizationId: transaction.organizationId,
+                  amount: transaction.amount,
+                  category: MutationCategory.PAYMENT_SETTLEMENT,
+                  referenceId: transaction.orderId,
+                  description: `Settlement for order ${transaction.orderId}`,
+                  metadata: {
+                    paymentId: transaction.id,
+                    midtransOrderId: transaction.midtransOrderId,
+                  },
+                },
+                tx,
+              );
+            }
+
+            this.logger.log(
+              `Synced payment for order ${transaction.orderId}: status updated to ${normalizedStatus} and PAYMENT_COMPLETED event emitted`,
+            );
+          } else if (isFailed) {
+            await this.outboxService.emit(
+              'PAYMENT',
+              transaction.orderId,
+              'PAYMENT_FAILED',
+              {
+                eventId: midtransStatus.transactionId || `sync-${Date.now()}`,
+                eventType: 'PAYMENT_FAILED',
+                orderId: transaction.orderId,
+                transactionId: transaction.id,
+                midtransOrderId: transaction.midtransOrderId,
+                midtransTransactionId: midtransStatus.transactionId,
+                amount: Number(transaction.amount),
+                currency: transaction.currency,
+                paymentType: midtransStatus.paymentType || transaction.channel,
+                status: normalizedStatus,
+                metadata: transaction.metadata,
+                source: 'STATUS_SYNC',
+              },
+              tx,
+            );
+
+            this.logger.warn(
+              `Synced payment for order ${transaction.orderId}: status updated to ${normalizedStatus} and PAYMENT_FAILED event emitted`,
+            );
+          }
         },
       );
-
-      if (isPaid) {
-        await this.outboxService.emit(
-          'PAYMENT',
-          transaction.orderId,
-          'PAYMENT_COMPLETED',
-          {
-            eventId: midtransStatus.transactionId || `sync-${Date.now()}`,
-            eventType: 'PAYMENT_COMPLETED',
-            orderId: transaction.orderId,
-            transactionId: transaction.id,
-            midtransOrderId: transaction.midtransOrderId,
-            midtransTransactionId: midtransStatus.transactionId,
-            amount: Number(transaction.amount),
-            currency: transaction.currency,
-            paymentType: midtransStatus.paymentType || transaction.channel,
-            settledAt: (paidAt || new Date()).toISOString(),
-            metadata: transaction.metadata,
-            source: 'STATUS_SYNC',
-          },
-        );
-        this.logger.log(
-          `Synced payment for order ${transaction.orderId}: status updated to ${normalizedStatus} and PAYMENT_COMPLETED event emitted`,
-        );
-      } else if (isFailed) {
-        await this.outboxService.emit(
-          'PAYMENT',
-          transaction.orderId,
-          'PAYMENT_FAILED',
-          {
-            eventId: midtransStatus.transactionId || `sync-${Date.now()}`,
-            eventType: 'PAYMENT_FAILED',
-            orderId: transaction.orderId,
-            transactionId: transaction.id,
-            midtransOrderId: transaction.midtransOrderId,
-            midtransTransactionId: midtransStatus.transactionId,
-            amount: Number(transaction.amount),
-            currency: transaction.currency,
-            paymentType: midtransStatus.paymentType || transaction.channel,
-            status: normalizedStatus,
-            metadata: transaction.metadata,
-            source: 'STATUS_SYNC',
-          },
-        );
-        this.logger.warn(
-          `Synced payment for order ${transaction.orderId}: status updated to ${normalizedStatus} and PAYMENT_FAILED event emitted`,
-        );
-      }
     }
 
     return {

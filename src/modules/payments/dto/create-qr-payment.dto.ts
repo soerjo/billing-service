@@ -47,4 +47,13 @@ export class CreateQrPaymentDto {
   @IsOptional()
   @IsObject()
   metadata?: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    example: 'org-123',
+    description:
+      'Owning organization; settled amount is credited to its balance',
+  })
+  @IsOptional()
+  @IsString()
+  organizationId?: string;
 }

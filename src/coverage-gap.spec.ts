@@ -2,7 +2,14 @@
 import { Kafka } from 'kafkajs';
 import axios from 'axios';
 import { validate } from 'class-validator';
-import { PaymentChannel, PaymentProvider } from '@prisma/client';
+import {
+  PaymentChannel,
+  PaymentProvider,
+  PaymentStatus,
+  Prisma,
+  MutationCategory,
+  PayoutStatus,
+} from '@prisma/client';
 import { ListPaymentOrdersDto } from './modules/payments/dto/list-payment-orders.dto.js';
 import { PaymentsRepository } from './modules/payments/payments.repository.js';
 import { PaymentsService } from './modules/payments/payments.service.js';
@@ -15,6 +22,8 @@ import { SignaturesController } from './modules/signatures/signatures.controller
 import { SignaturesService } from './modules/signatures/signatures.service.js';
 import { MidtransService } from './modules/midtrans/midtrans.service.js';
 import { OutboxService } from './modules/outbox/outbox.service.js';
+import { TenantBalanceService } from './modules/tenant-balance/tenant-balance.service.js';
+import { PayoutsRepository } from './modules/payouts/payouts.repository.js';
 import { PrismaService } from './prisma/prisma.service.js';
 import { RedisIdempotencyService } from './common/redis/redis-idempotency.service.js';
 import { ApiKeyGuard } from './common/guards/api-key.guard.js';
@@ -899,6 +908,7 @@ describe('coverage gaps', () => {
       updateTransactionStatus: jest.fn(),
       withOrderLock: jest.fn((id, cb) => cb({})),
       findSuccessfulByOrderId: jest.fn().mockResolvedValue(null),
+      lockStatusForUpdate: jest.fn().mockResolvedValue('PENDING'),
       findPendingByOrderId: jest.fn().mockResolvedValue(null),
       createTransaction: jest.fn().mockResolvedValue({ id: 't' }),
     } as any;
@@ -928,6 +938,10 @@ describe('coverage gaps', () => {
       mockMidtrans,
       { findEnabledBank: jest.fn().mockResolvedValue({ code: 'bca' }) } as any,
       { emit: jest.fn() } as any,
+      // Partial stub: only the method under test is provided.
+      {
+        credit: jest.fn().mockResolvedValue({}),
+      } as unknown as TenantBalanceService,
     );
     await paymentsSvc.syncPaymentStatus('ORD-1');
     await paymentsSvc.createQrPayment({ orderId: 'ORD-1', amount: 100 });
@@ -958,6 +972,15 @@ describe('coverage gaps', () => {
       webhookPrisma,
       { verifySignatureKey: jest.fn().mockReturnValue(true) } as any,
       { emit: jest.fn() } as any,
+      // Partial stub: only the method under test is provided.
+      {
+        findByOrderId: jest.fn(),
+        lockStatusForUpdate: jest.fn().mockResolvedValue('PENDING'),
+      } as unknown as PaymentsRepository,
+      // Partial stub: only the method under test is provided.
+      {
+        credit: jest.fn().mockResolvedValue({}),
+      } as unknown as TenantBalanceService,
     );
     await webhookSvc.handleMidtransWebhook({
       order_id: 'O',
@@ -968,5 +991,370 @@ describe('coverage gaps', () => {
       transaction_status: 'settlement',
       settlement_time: undefined,
     } as any);
+  });
+
+  it('covers PaymentsRepository.lockStatusForUpdate, PayoutsRepository, and TenantBalanceService.getBalance', async () => {
+    const paymentsRepository = new PaymentsRepository(
+      {} as unknown as PrismaService,
+    );
+    const lockTx = {
+      $queryRaw: jest
+        .fn()
+        .mockResolvedValueOnce([{ status: PaymentStatus.PENDING }])
+        .mockResolvedValueOnce([]),
+    } as unknown as Prisma.TransactionClient;
+    await expect(
+      paymentsRepository.lockStatusForUpdate('tx-1', lockTx),
+    ).resolves.toBe(PaymentStatus.PENDING);
+    await expect(
+      paymentsRepository.lockStatusForUpdate('missing', lockTx),
+    ).rejects.toThrow(NotFoundException);
+
+    const payoutRequest = {
+      create: jest.fn().mockResolvedValue({ id: 'po-1' }),
+      findUnique: jest
+        .fn()
+        .mockResolvedValueOnce({ id: 'po-1' })
+        .mockResolvedValueOnce(null),
+      findMany: jest.fn().mockResolvedValue([{ id: 'po-1' }]),
+      count: jest.fn().mockResolvedValue(1),
+      updateMany: jest
+        .fn()
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 }),
+      findUniqueOrThrow: jest
+        .fn()
+        .mockResolvedValue({ id: 'po-1', status: PayoutStatus.APPROVED }),
+    };
+    const payoutTx = { payoutRequest } as unknown as Prisma.TransactionClient;
+    const payoutTransactionMock = jest.fn((arg: unknown) => {
+      if (typeof arg === 'function') {
+        return arg(payoutTx);
+      }
+      return Promise.all(arg as Promise<unknown>[]);
+    });
+    const payoutPrisma = {
+      payoutRequest,
+      $transaction: payoutTransactionMock,
+    } as unknown as PrismaService;
+    const payoutsRepository = new PayoutsRepository(payoutPrisma);
+
+    await expect(
+      payoutsRepository.create({
+        organizationId: 'org-1',
+        amount: 100,
+      } as Prisma.PayoutRequestUncheckedCreateInput),
+    ).resolves.toEqual({ id: 'po-1' });
+    expect(payoutRequest.create).toHaveBeenCalledWith({
+      data: { organizationId: 'org-1', amount: 100 },
+    });
+
+    await expect(payoutsRepository.findById('po-1')).resolves.toEqual({
+      id: 'po-1',
+    });
+    await expect(payoutsRepository.findById('po-2')).rejects.toThrow(
+      NotFoundException,
+    );
+
+    await payoutsRepository.findManyByOrganization({
+      organizationId: 'org-1',
+      status: PayoutStatus.APPROVED,
+      page: 2,
+      limit: 5,
+    });
+    expect(payoutRequest.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: { organizationId: 'org-1', status: PayoutStatus.APPROVED },
+        skip: 5,
+        take: 5,
+      }),
+    );
+    const listed = await payoutsRepository.findManyByOrganization({
+      organizationId: 'org-1',
+      page: 1,
+      limit: 10,
+    });
+    expect(payoutRequest.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: { organizationId: 'org-1', status: undefined },
+        skip: 0,
+        take: 10,
+      }),
+    );
+    expect(listed).toEqual({
+      items: [{ id: 'po-1' }],
+      total: 1,
+      page: 1,
+      limit: 10,
+    });
+
+    await expect(
+      payoutsRepository.updateStatusIf(
+        'po-1',
+        [PayoutStatus.PENDING],
+        { status: PayoutStatus.APPROVED },
+        payoutTx,
+      ),
+    ).resolves.toEqual({ id: 'po-1', status: PayoutStatus.APPROVED });
+    await expect(
+      payoutsRepository.updateStatusIf(
+        'po-1',
+        [PayoutStatus.PENDING],
+        { status: PayoutStatus.APPROVED },
+        payoutTx,
+      ),
+    ).resolves.toBeNull();
+
+    await expect(
+      payoutsRepository.transaction((tx) => {
+        expect(tx).toBe(payoutTx);
+        return Promise.resolve('committed');
+      }),
+    ).resolves.toBe('committed');
+    expect(payoutTransactionMock).toHaveBeenCalledTimes(3);
+
+    const balanceUpsertMock = jest
+      .fn()
+      .mockResolvedValue({ id: 'bal-1', organizationId: 'org-1' });
+    const balancePrisma = {
+      tenantBalance: {
+        upsert: balanceUpsertMock,
+      },
+    } as unknown as PrismaService;
+    const tenantBalanceService = new TenantBalanceService(balancePrisma);
+    await expect(tenantBalanceService.getBalance('org-1')).resolves.toEqual({
+      id: 'bal-1',
+      organizationId: 'org-1',
+    });
+    expect(balanceUpsertMock).toHaveBeenCalledWith({
+      where: { organizationId: 'org-1' },
+      create: { organizationId: 'org-1' },
+      update: {},
+    });
+  });
+
+  it('credits tenant balance on sync settlement when transaction has organizationId', async () => {
+    const credit = jest.fn().mockResolvedValue({});
+    const emit = jest.fn().mockResolvedValue(undefined);
+    // Partial stubs: only the methods exercised by syncPaymentStatus are provided.
+    const paymentsRepo = {
+      findTransactionsForSync: jest.fn().mockResolvedValue([
+        {
+          id: 'tx-org',
+          orderId: 'ORD-ORG',
+          midtransOrderId: 'ORD-ORG-TX1',
+          status: 'PENDING',
+          amount: 250,
+          currency: 'IDR',
+          channel: 'QRIS',
+          metadata: null,
+          paidAt: null,
+          organizationId: 'org-test',
+        },
+      ]),
+      withOrderLock: jest.fn((_orderId, cb) => cb({})),
+      lockStatusForUpdate: jest.fn().mockResolvedValue('PENDING'),
+      updateTransactionStatus: jest.fn().mockResolvedValue({}),
+    };
+    const midtrans = {
+      getTransactionStatus: jest.fn().mockResolvedValue({
+        statusCode: '200',
+        transactionStatus: 'settlement',
+        transactionId: 'mt-1',
+        paymentType: 'qris',
+        rawResponse: {},
+      }),
+    };
+    const paymentsSvc = new PaymentsService(
+      paymentsRepo as unknown as PaymentsRepository,
+      midtrans as unknown as MidtransService,
+      {} as unknown as PaymentMethodsService,
+      { emit } as unknown as OutboxService,
+      { credit } as unknown as TenantBalanceService,
+    );
+
+    await paymentsSvc.syncPaymentStatus('ORD-ORG');
+
+    expect(credit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        organizationId: 'org-test',
+        amount: 250,
+        category: MutationCategory.PAYMENT_SETTLEMENT,
+        referenceId: 'ORD-ORG',
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('uses fallback event id, payment type, and settledAt when sync status omits them', async () => {
+    const emit = jest.fn().mockResolvedValue(undefined);
+    const paymentsRepo = {
+      findTransactionsForSync: jest.fn().mockResolvedValue([
+        {
+          id: 'tx-fb',
+          orderId: 'ORD-FB',
+          midtransOrderId: 'ORD-FB-TX1',
+          status: 'PENDING',
+          amount: 75,
+          currency: 'IDR',
+          channel: 'QRIS',
+          metadata: null,
+          paidAt: null,
+          organizationId: null,
+        },
+      ]),
+      withOrderLock: jest.fn((_orderId, cb) => cb({})),
+      lockStatusForUpdate: jest.fn().mockResolvedValue('PENDING'),
+      updateTransactionStatus: jest.fn().mockResolvedValue({}),
+    };
+    const midtrans = {
+      getTransactionStatus: jest.fn().mockResolvedValue({
+        statusCode: '200',
+        transactionStatus: 'settlement',
+        transactionId: undefined,
+        paymentType: undefined,
+        settlementTime: undefined,
+        rawResponse: {},
+      }),
+    };
+    const paymentsSvc = new PaymentsService(
+      paymentsRepo as unknown as PaymentsRepository,
+      midtrans as unknown as MidtransService,
+      {} as unknown as PaymentMethodsService,
+      { emit } as unknown as OutboxService,
+      { credit: jest.fn() } as unknown as TenantBalanceService,
+    );
+
+    const before = Date.now();
+    await paymentsSvc.syncPaymentStatus('ORD-FB');
+
+    expect(emit).toHaveBeenCalledWith(
+      'PAYMENT',
+      'ORD-FB',
+      'PAYMENT_COMPLETED',
+      expect.objectContaining({
+        eventId: expect.stringMatching(/^sync-\d+$/),
+        paymentType: 'QRIS',
+        midtransTransactionId: undefined,
+      }),
+      expect.anything(),
+    );
+    const payload = emit.mock.calls[0][3];
+    expect(Date.parse(payload.settledAt)).toBeGreaterThanOrEqual(before);
+  });
+
+  it('credits tenant balance on webhook settlement when transaction has organizationId', async () => {
+    const credit = jest.fn().mockResolvedValue({});
+    const txClient = {
+      webhookEvent: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({}),
+      },
+      paymentTransaction: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'tx-org',
+          orderId: 'ORD-ORG',
+          midtransOrderId: 'ORD-ORG-TX1',
+          status: 'PENDING',
+          amount: 250,
+          currency: 'IDR',
+          channel: 'QRIS',
+          metadata: null,
+          paidAt: null,
+          organizationId: 'org-test',
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+    };
+    // Partial stub: $transaction runs the callback against txClient.
+    const prisma = {
+      ...txClient,
+      $transaction: jest.fn((cb) => cb(txClient)),
+    };
+    const webhookSvc = new WebhooksService(
+      prisma as unknown as PrismaService,
+      {
+        verifySignatureKey: jest.fn().mockReturnValue(true),
+      } as unknown as MidtransService,
+      { emit: jest.fn() } as unknown as OutboxService,
+      {
+        lockStatusForUpdate: jest.fn().mockResolvedValue('PENDING'),
+      } as unknown as PaymentsRepository,
+      { credit } as unknown as TenantBalanceService,
+    );
+
+    await webhookSvc.handleMidtransWebhook({
+      order_id: 'ORD-ORG-TX1',
+      status_code: '200',
+      gross_amount: '250',
+      signature_key: 'sig',
+      transaction_id: 'mt-2',
+      transaction_status: 'settlement',
+      settlement_time: '2026-10-31T10:00:00Z',
+    } as unknown as Parameters<WebhooksService['handleMidtransWebhook']>[0]);
+
+    expect(credit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        organizationId: 'org-test',
+        amount: 250,
+        category: MutationCategory.PAYMENT_SETTLEMENT,
+        referenceId: 'ORD-ORG',
+      }),
+      txClient,
+    );
+  });
+
+  it('skips status update and outbox emit when row lock shows status already matches under race', async () => {
+    const emit = jest.fn().mockResolvedValue(undefined);
+    const credit = jest.fn().mockResolvedValue({});
+    const updateTransactionStatus = jest.fn().mockResolvedValue({});
+    const lockStatusForUpdate = jest.fn().mockResolvedValue('SETTLEMENT');
+    // Partial stubs: only the methods exercised by syncPaymentStatus are provided.
+    const paymentsRepo = {
+      findTransactionsForSync: jest.fn().mockResolvedValue([
+        {
+          id: 'tx-race',
+          orderId: 'ORD-RACE',
+          midtransOrderId: 'ORD-RACE-TX1',
+          status: 'PENDING',
+          amount: 500,
+          currency: 'IDR',
+          channel: 'QRIS',
+          metadata: null,
+          paidAt: null,
+          organizationId: 'org-race',
+        },
+      ]),
+      withOrderLock: jest.fn((_orderId, cb) => cb({})),
+      lockStatusForUpdate,
+      updateTransactionStatus,
+    };
+    const midtrans = {
+      getTransactionStatus: jest.fn().mockResolvedValue({
+        statusCode: '200',
+        transactionStatus: 'settlement',
+        transactionId: 'mt-race',
+        paymentType: 'qris',
+        rawResponse: {},
+      }),
+    };
+    const paymentsSvc = new PaymentsService(
+      paymentsRepo as unknown as PaymentsRepository,
+      midtrans as unknown as MidtransService,
+      {} as unknown as PaymentMethodsService,
+      { emit } as unknown as OutboxService,
+      { credit } as unknown as TenantBalanceService,
+    );
+
+    const result = await paymentsSvc.syncPaymentStatus('ORD-RACE');
+
+    expect(lockStatusForUpdate).toHaveBeenCalledWith(
+      'tx-race',
+      expect.anything(),
+    );
+    expect(updateTransactionStatus).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+    expect(credit).not.toHaveBeenCalled();
+    expect(result.statusChanged).toBe(true);
   });
 });

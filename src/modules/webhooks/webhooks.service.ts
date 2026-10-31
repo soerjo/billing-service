@@ -2,7 +2,9 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { MidtransService } from '../midtrans/midtrans.service.js';
 import { OutboxService } from '../outbox/outbox.service.js';
-import { PaymentStatus, Prisma } from '@prisma/client';
+import { PaymentsRepository } from '../payments/payments.repository.js';
+import { TenantBalanceService } from '../tenant-balance/tenant-balance.service.js';
+import { MutationCategory, PaymentStatus, Prisma } from '@prisma/client';
 import { MidtransWebhookDto } from './dto/midtrans-webhook.dto.js';
 
 export type MidtransWebhookPayload = MidtransWebhookDto;
@@ -14,6 +16,8 @@ export class WebhooksService {
     private readonly prisma: PrismaService,
     private readonly midtransService: MidtransService,
     private readonly outboxService: OutboxService,
+    private readonly paymentsRepository: PaymentsRepository,
+    private readonly tenantBalanceService: TenantBalanceService,
   ) {}
 
   async handleMidtransWebhook(payload: MidtransWebhookPayload) {
@@ -74,6 +78,12 @@ export class WebhooksService {
         return { status: 'TRANSACTION_NOT_FOUND', orderId: order_id };
       }
 
+      // Lock the row so concurrent webhooks/syncs for this payment serialize.
+      const currentStatus = await this.paymentsRepository.lockStatusForUpdate(
+        transaction.id,
+        tx,
+      );
+
       const normalizedStatus =
         transaction_status.toUpperCase() as PaymentStatus;
       const isPaid =
@@ -83,12 +93,8 @@ export class WebhooksService {
         transaction_status === 'deny' ||
         transaction_status === 'cancel' ||
         transaction_status === 'expire';
-      const wasPaid = ['SETTLEMENT', 'CAPTURE'].includes(
-        transaction.status.toUpperCase(),
-      );
-      const wasFailed = ['DENY', 'CANCEL', 'EXPIRE'].includes(
-        transaction.status.toUpperCase(),
-      );
+      const wasPaid = ['SETTLEMENT', 'CAPTURE'].includes(currentStatus);
+      const wasFailed = ['DENY', 'CANCEL', 'EXPIRE'].includes(currentStatus);
 
       const paidAt = isPaid
         ? payload.settlement_time
@@ -128,6 +134,23 @@ export class WebhooksService {
           },
           tx,
         );
+
+        if (transaction.organizationId) {
+          await this.tenantBalanceService.credit(
+            {
+              organizationId: transaction.organizationId,
+              amount: transaction.amount,
+              category: MutationCategory.PAYMENT_SETTLEMENT,
+              referenceId: transaction.orderId,
+              description: `Settlement for order ${transaction.orderId}`,
+              metadata: {
+                paymentId: transaction.id,
+                midtransOrderId: transaction.midtransOrderId,
+              },
+            },
+            tx,
+          );
+        }
 
         this.logger.log(
           `Payment for order ${transaction.orderId} (tx: ${transaction.midtransOrderId}) completed via Midtrans webhook`,

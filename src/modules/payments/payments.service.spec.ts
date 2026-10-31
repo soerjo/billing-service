@@ -9,6 +9,7 @@ import { PaymentsRepository } from './payments.repository.js';
 import { MidtransService } from '../midtrans/midtrans.service.js';
 import { PaymentMethodsService } from '../payment-methods/payment-methods.service.js';
 import { OutboxService } from '../outbox/outbox.service.js';
+import { TenantBalanceService } from '../tenant-balance/tenant-balance.service.js';
 import { PaymentChannel, Prisma } from '@prisma/client';
 
 describe('PaymentsService', () => {
@@ -27,6 +28,7 @@ describe('PaymentsService', () => {
     listOrders: jest.fn(),
     updateTransactionStatus: jest.fn(),
     withOrderLock: jest.fn(),
+    lockStatusForUpdate: jest.fn(),
   };
 
   const mockMidtransService = {
@@ -45,6 +47,10 @@ describe('PaymentsService', () => {
     emit: jest.fn(),
   };
 
+  const mockTenantBalanceService = {
+    credit: jest.fn(),
+  };
+
   beforeEach(async () => {
     jest.resetAllMocks();
     mockRepository.withOrderLock.mockImplementation(
@@ -58,6 +64,7 @@ describe('PaymentsService', () => {
         { provide: MidtransService, useValue: mockMidtransService },
         { provide: PaymentMethodsService, useValue: mockPaymentMethodsService },
         { provide: OutboxService, useValue: mockOutboxService },
+        { provide: TenantBalanceService, useValue: mockTenantBalanceService },
       ],
     }).compile();
 
@@ -369,6 +376,7 @@ describe('PaymentsService', () => {
         expect.objectContaining({
           midtransTransactionId: 'mt-tx-123',
         }),
+        expect.anything(),
       );
       expect(mockOutboxService.emit).toHaveBeenCalledWith(
         'PAYMENT',
@@ -378,6 +386,7 @@ describe('PaymentsService', () => {
           orderId: 'ORD-SYNC-1',
           source: 'STATUS_SYNC',
         }),
+        expect.anything(),
       );
     });
 
@@ -403,6 +412,7 @@ describe('PaymentsService', () => {
           status: 'DENY',
           source: 'STATUS_SYNC',
         }),
+        expect.anything(),
       );
     });
 
