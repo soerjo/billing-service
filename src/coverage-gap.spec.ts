@@ -1303,4 +1303,58 @@ describe('coverage gaps', () => {
       txClient,
     );
   });
+
+  it('skips status update and outbox emit when row lock shows status already matches under race', async () => {
+    const emit = jest.fn().mockResolvedValue(undefined);
+    const credit = jest.fn().mockResolvedValue({});
+    const updateTransactionStatus = jest.fn().mockResolvedValue({});
+    const lockStatusForUpdate = jest.fn().mockResolvedValue('SETTLEMENT');
+    // Partial stubs: only the methods exercised by syncPaymentStatus are provided.
+    const paymentsRepo = {
+      findTransactionsForSync: jest.fn().mockResolvedValue([
+        {
+          id: 'tx-race',
+          orderId: 'ORD-RACE',
+          midtransOrderId: 'ORD-RACE-TX1',
+          status: 'PENDING',
+          amount: 500,
+          currency: 'IDR',
+          channel: 'QRIS',
+          metadata: null,
+          paidAt: null,
+          organizationId: 'org-race',
+        },
+      ]),
+      withOrderLock: jest.fn((_orderId, cb) => cb({})),
+      lockStatusForUpdate,
+      updateTransactionStatus,
+    };
+    const midtrans = {
+      getTransactionStatus: jest.fn().mockResolvedValue({
+        statusCode: '200',
+        transactionStatus: 'settlement',
+        transactionId: 'mt-race',
+        paymentType: 'qris',
+        rawResponse: {},
+      }),
+    };
+    const paymentsSvc = new PaymentsService(
+      paymentsRepo as unknown as PaymentsRepository,
+      midtrans as unknown as MidtransService,
+      {} as unknown as PaymentMethodsService,
+      { emit } as unknown as OutboxService,
+      { credit } as unknown as TenantBalanceService,
+    );
+
+    const result = await paymentsSvc.syncPaymentStatus('ORD-RACE');
+
+    expect(lockStatusForUpdate).toHaveBeenCalledWith(
+      'tx-race',
+      expect.anything(),
+    );
+    expect(updateTransactionStatus).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+    expect(credit).not.toHaveBeenCalled();
+    expect(result.statusChanged).toBe(true);
+  });
 });
