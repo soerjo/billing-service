@@ -15,6 +15,7 @@ export class PaymentsRepository {
   async createTransaction(
     data: {
       orderId: string;
+      organizationId?: string;
       amount: number | Prisma.Decimal;
       currency?: string;
       description?: string;
@@ -37,6 +38,7 @@ export class PaymentsRepository {
     return client.paymentTransaction.create({
       data: {
         orderId: data.orderId,
+        organizationId: data.organizationId,
         amount: data.amount,
         currency: data.currency || 'IDR',
         description: data.description,
@@ -278,6 +280,20 @@ export class PaymentsRepository {
       },
     );
   }
+
+  async lockStatusForUpdate(
+    id: string,
+    tx: Prisma.TransactionClient,
+  ): Promise<PaymentStatus> {
+    const [row] = await tx.$queryRaw<{ status: PaymentStatus }[]>`
+      SELECT status FROM payment_transactions WHERE id = ${id} FOR UPDATE
+    `;
+    if (!row) {
+      throw new NotFoundException(`Payment transaction '${id}' not found`);
+    }
+    return row.status;
+  }
+
   async updateTransactionStatus(
     id: string,
     status: PaymentStatus,

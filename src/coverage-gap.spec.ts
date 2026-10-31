@@ -15,6 +15,7 @@ import { SignaturesController } from './modules/signatures/signatures.controller
 import { SignaturesService } from './modules/signatures/signatures.service.js';
 import { MidtransService } from './modules/midtrans/midtrans.service.js';
 import { OutboxService } from './modules/outbox/outbox.service.js';
+import { TenantBalanceService } from './modules/tenant-balance/tenant-balance.service.js';
 import { PrismaService } from './prisma/prisma.service.js';
 import { RedisIdempotencyService } from './common/redis/redis-idempotency.service.js';
 import { ApiKeyGuard } from './common/guards/api-key.guard.js';
@@ -899,6 +900,7 @@ describe('coverage gaps', () => {
       updateTransactionStatus: jest.fn(),
       withOrderLock: jest.fn((id, cb) => cb({})),
       findSuccessfulByOrderId: jest.fn().mockResolvedValue(null),
+      lockStatusForUpdate: jest.fn().mockResolvedValue('PENDING'),
       findPendingByOrderId: jest.fn().mockResolvedValue(null),
       createTransaction: jest.fn().mockResolvedValue({ id: 't' }),
     } as any;
@@ -928,6 +930,10 @@ describe('coverage gaps', () => {
       mockMidtrans,
       { findEnabledBank: jest.fn().mockResolvedValue({ code: 'bca' }) } as any,
       { emit: jest.fn() } as any,
+      // Partial stub: only the method under test is provided.
+      {
+        credit: jest.fn().mockResolvedValue({}),
+      } as unknown as TenantBalanceService,
     );
     await paymentsSvc.syncPaymentStatus('ORD-1');
     await paymentsSvc.createQrPayment({ orderId: 'ORD-1', amount: 100 });
@@ -958,6 +964,15 @@ describe('coverage gaps', () => {
       webhookPrisma,
       { verifySignatureKey: jest.fn().mockReturnValue(true) } as any,
       { emit: jest.fn() } as any,
+      // Partial stub: only the method under test is provided.
+      {
+        findByOrderId: jest.fn(),
+        lockStatusForUpdate: jest.fn().mockResolvedValue('PENDING'),
+      } as unknown as PaymentsRepository,
+      // Partial stub: only the method under test is provided.
+      {
+        credit: jest.fn().mockResolvedValue({}),
+      } as unknown as TenantBalanceService,
     );
     await webhookSvc.handleMidtransWebhook({
       order_id: 'O',

@@ -46,6 +46,7 @@ model PaymentTransaction {
   orderId               String          @map("order_id") // External order/invoice ID from calling service
   amount                Decimal         @map("gross_amount") @db.Decimal(12, 2)
   currency              String          @default("IDR")
+  organizationId        String?         @map("organization_id")
   description           String?
   metadata              Json?
   provider              PaymentProvider @default(MIDTRANS)
@@ -66,32 +67,33 @@ model PaymentTransaction {
   updatedAt             DateTime        @updatedAt @map("updated_at")
 
   @@index([orderId])
+  @@index([organizationId])
   @@index([status])
   @@index([createdAt])
   @@map("payment_transactions")
 }
 
 model WebhookEvent {
-  id            String   @id @default(uuid())
-  provider      String   @default("MIDTRANS")
-  eventId       String   @unique @map("event_id") // transaction_id
-  orderId       String   @map("order_id")
-  signatureKey  String   @map("signature_key")
-  payload       Json
-  processedAt   DateTime @default(now()) @map("processed_at")
+  id           String   @id @default(uuid())
+  provider     String   @default("MIDTRANS")
+  eventId      String   @unique @map("event_id") // transaction_id
+  orderId      String   @map("order_id")
+  signatureKey String   @map("signature_key")
+  payload      Json
+  processedAt  DateTime @default(now()) @map("processed_at")
 
   @@map("webhook_events")
 }
 
 model OutboxEvent {
-  id            String    @id @default(uuid())
-  aggregateType String    @map("aggregate_type") // INVOICE
-  aggregateId   String    @map("aggregate_id")   // invoiceId
-  eventType     String    @map("event_type")     // INVOICE_PAID, INVOICE_EXPIRED
+  id            String       @id @default(uuid())
+  aggregateType String       @map("aggregate_type") // INVOICE
+  aggregateId   String       @map("aggregate_id") // invoiceId
+  eventType     String       @map("event_type") // INVOICE_PAID, INVOICE_EXPIRED
   payload       Json
   status        OutboxStatus @default(PENDING)
-  createdAt     DateTime  @default(now()) @map("created_at")
-  processedAt   DateTime? @map("processed_at")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  processedAt   DateTime?    @map("processed_at")
 
   @@index([status, createdAt])
   @@map("outbox_events")
@@ -107,4 +109,77 @@ model VirtualAccountBank {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("virtual_account_banks")
+}
+
+enum MutationType {
+  CREDIT
+  DEBIT
+}
+
+enum MutationCategory {
+  PAYMENT_SETTLEMENT
+  PAYOUT
+  FEE
+  ADJUSTMENT
+}
+
+enum PayoutStatus {
+  PENDING
+  APPROVED
+  PROCESSING
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+model TenantBalance {
+  id               String   @id @default(uuid())
+  organizationId   String   @unique @map("organization_id")
+  currency         String   @default("IDR")
+  availableBalance Decimal  @default(0) @map("available_balance") @db.Decimal(14, 2)
+  pendingBalance   Decimal  @default(0) @map("pending_balance") @db.Decimal(14, 2)
+  lockedBalance    Decimal  @default(0) @map("locked_balance") @db.Decimal(14, 2)
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("tenant_balances")
+}
+
+model BalanceMutation {
+  id             String           @id @default(uuid())
+  organizationId String           @map("organization_id")
+  type           MutationType
+  category       MutationCategory
+  amount         Decimal          @db.Decimal(14, 2)
+  balanceBefore  Decimal          @map("balance_before") @db.Decimal(14, 2)
+  balanceAfter   Decimal          @map("balance_after") @db.Decimal(14, 2)
+  referenceId    String?          @map("reference_id")
+  description    String?
+  metadata       Json?
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  @@index([organizationId, createdAt])
+  @@index([referenceId])
+  @@map("balance_mutations")
+}
+
+model PayoutRequest {
+  id                String       @id @default(uuid())
+  organizationId    String       @map("organization_id")
+  amount            Decimal      @db.Decimal(14, 2)
+  currency          String       @default("IDR")
+  bankCode          String       @map("bank_code")
+  bankAccountNumber String       @map("bank_account_number")
+  bankAccountName   String       @map("bank_account_name")
+  status            PayoutStatus @default(PENDING)
+  referenceNo       String       @unique @map("reference_no")
+  rejectedReason    String?      @map("rejected_reason")
+  approvedAt        DateTime?    @map("approved_at")
+  completedAt       DateTime?    @map("completed_at")
+  createdAt         DateTime     @default(now()) @map("created_at")
+  updatedAt         DateTime     @updatedAt @map("updated_at")
+
+  @@index([organizationId, status])
+  @@index([createdAt])
+  @@map("payout_requests")
 }

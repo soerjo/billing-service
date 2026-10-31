@@ -5,6 +5,8 @@ import { MidtransService } from '../midtrans/midtrans.service.js';
 import { OutboxService } from '../outbox/outbox.service.js';
 import { BadRequestException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { PaymentsRepository } from '../payments/payments.repository.js';
+import { TenantBalanceService } from '../tenant-balance/tenant-balance.service.js';
 
 describe('WebhooksService', () => {
   let service: WebhooksService;
@@ -33,6 +35,14 @@ describe('WebhooksService', () => {
     verifySignatureKey: jest.fn(),
   };
 
+  const mockPaymentsRepository = {
+    lockStatusForUpdate: jest.fn(),
+  };
+
+  const mockTenantBalanceService = {
+    credit: jest.fn(),
+  };
+
   const mockOutboxService = {
     emit: jest.fn(),
   };
@@ -46,6 +56,8 @@ describe('WebhooksService', () => {
         { provide: PrismaService, useValue: mockPrisma },
         { provide: MidtransService, useValue: mockMidtransService },
         { provide: OutboxService, useValue: mockOutboxService },
+        { provide: PaymentsRepository, useValue: mockPaymentsRepository },
+        { provide: TenantBalanceService, useValue: mockTenantBalanceService },
       ],
     }).compile();
 
@@ -201,7 +213,7 @@ describe('WebhooksService', () => {
       metadata: null,
       paidAt: new Date(),
     });
-
+    mockPaymentsRepository.lockStatusForUpdate.mockResolvedValue('SETTLEMENT');
     const result = await service.handleMidtransWebhook({
       ...validPayload,
       order_id: 'ORD-SETTLED-TX1',
