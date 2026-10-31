@@ -31,6 +31,7 @@ import { createRequestLoggingMiddleware } from './common/middleware/request-logg
 import { validate as validateEnvironment } from './config/env.validation.js';
 import {
   BadGatewayException,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -1355,6 +1356,82 @@ describe('coverage gaps', () => {
     expect(updateTransactionStatus).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalled();
     expect(credit).not.toHaveBeenCalled();
+    expect(result.statusChanged).toBe(true);
+  });
+
+  it('emits PAYMENT_FAILED and warns when sync maps a pending transaction to DENY', async () => {
+    const emit = jest.fn().mockResolvedValue(undefined);
+    const credit = jest.fn().mockResolvedValue({});
+    const updateTransactionStatus = jest.fn().mockResolvedValue({});
+    const lockStatusForUpdate = jest.fn().mockResolvedValue('PENDING');
+    // Partial stubs: only the methods exercised by syncPaymentStatus are provided.
+    const paymentsRepo = {
+      findTransactionsForSync: jest.fn().mockResolvedValue([
+        {
+          id: 'tx-deny',
+          orderId: 'ORD-DENY',
+          midtransOrderId: 'ORD-DENY-TX1',
+          status: 'PENDING',
+          amount: 750,
+          currency: 'IDR',
+          channel: 'QRIS',
+          metadata: null,
+          paidAt: null,
+          organizationId: 'org-deny',
+        },
+      ]),
+      withOrderLock: jest.fn((_orderId, cb) => cb({})),
+      lockStatusForUpdate,
+      updateTransactionStatus,
+    };
+    const midtrans = {
+      getTransactionStatus: jest.fn().mockResolvedValue({
+        statusCode: '200',
+        transactionStatus: 'deny',
+        transactionId: 'mt-deny',
+        paymentType: 'qris',
+        rawResponse: {},
+      }),
+    };
+    const paymentsSvc = new PaymentsService(
+      paymentsRepo as unknown as PaymentsRepository,
+      midtrans as unknown as MidtransService,
+      {} as unknown as PaymentMethodsService,
+      { emit } as unknown as OutboxService,
+      { credit } as unknown as TenantBalanceService,
+    );
+    const warnSpy = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+
+    const result = await paymentsSvc.syncPaymentStatus('ORD-DENY');
+
+    expect(lockStatusForUpdate).toHaveBeenCalledWith(
+      'tx-deny',
+      expect.anything(),
+    );
+    expect(updateTransactionStatus).toHaveBeenCalledWith(
+      'tx-deny',
+      'DENY',
+      expect.objectContaining({ midtransTransactionId: 'mt-deny' }),
+      expect.anything(),
+    );
+    expect(emit).toHaveBeenCalledWith(
+      'PAYMENT',
+      'ORD-DENY',
+      'PAYMENT_FAILED',
+      expect.objectContaining({
+        eventType: 'PAYMENT_FAILED',
+        status: 'DENY',
+        source: 'STATUS_SYNC',
+      }),
+      expect.anything(),
+    );
+    expect(credit).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      'Synced payment for order ORD-DENY: status updated to DENY and PAYMENT_FAILED event emitted',
+    );
+    warnSpy.mockRestore();
     expect(result.statusChanged).toBe(true);
   });
 });
